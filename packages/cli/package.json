@@ -1,0 +1,24 @@
+{
+  "name": "@zcode-community/cli",
+  "version": "0.2.0-alpha.1",
+  "description": "Command-line diagnostic and execution interface for Computer Use (cua).",
+  "type": "module",
+  "bin": {
+    "cua": "./bin/cua.mjs"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc && chmod +x bin/cua.mjs",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zcode-community/core": "*",
+    "@zcode-community/mcp-server": "*",
+    "@zcode-community/platform-macos": "*",
+    "@zcode-community/platform-windows": "*",
+    "@zcode-community/platform-linux": "*"
+  },
+  "license": "Apache-2.0"
+}

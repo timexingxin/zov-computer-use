@@ -1,0 +1,31 @@
+{
+  "name": "macos-computer-use-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Turnkey macOS Computer Use Skills + Open-Source Accessibility MCP Server + Optional ZCode Native Bridge for AI Agents.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "node scripts/build-all.mjs",
+    "test": "node scripts/run-tests.mjs",
+    "test:unit": "node scripts/run-tests.mjs",
+    "test:e2e:real": "node packages/cli/bin/cua.mjs doctor --require-real-gui && node scripts/run-tests.mjs --real-gui",
+    "typecheck": "node scripts/build-all.mjs --typecheck",
+    "lint": "node scripts/lint.mjs",
+    "clean": "node scripts/build-all.mjs --clean",
+    "cua": "node packages/cli/bin/cua.mjs",
+    "doctor": "node packages/cli/bin/cua.mjs doctor",
+    "install-kit": "node scripts/install.mjs",
+    "probe": "python3 skills/zcode-computer-use/scripts/rpc_probe.py --guard"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "Apache-2.0"
+}
