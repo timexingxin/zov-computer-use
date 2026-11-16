@@ -1,6 +1,6 @@
 # Demo Recording Script (30–60s)
 
-A step-by-step walkthrough to record a high-impact, professional demonstration of `zcode-desktop-control` operating safely without stealing user focus.
+A step-by-step walkthrough to record a high-impact, professional demonstration of `macos-computer-use-kit` operating safely without stealing user focus.
 
 ---
 
@@ -14,10 +14,10 @@ Risk Level: **Zero** (no personal data, credentials, or network exposure).
 ## Timeline & Narration Script
 
 ### [0:00 - 0:10] Preflight & Doctor Verification
-1. Open Terminal in the `zcode-desktop-control` workspace.
+1. Open Terminal in the `macos-computer-use-kit` workspace.
 2. Run:
    ```bash
-   pnpm doctor
+   npm run doctor
    ```
 3. Highlight the green `[PASS]` marks verifying Node.js, macOS Accessibility, and 40 MCP tools registered.
 
@@ -43,4 +43,4 @@ Risk Level: **Zero** (no personal data, credentials, or network exposure).
 
 ### [0:45 - 0:60] Clean Exit & Kill Switch
 1. Call `stop_computer_control` or close Calculator.
-2. End on project GitHub link: `https://github.com/timexingxin/zcode-desktop-control`.
+2. End on project GitHub link: `https://github.com/timexingxin/macos-computer-use-kit`.

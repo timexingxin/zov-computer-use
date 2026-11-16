@@ -62,14 +62,13 @@ export async function runDoctor(): Promise<DoctorReport> {
         windowServerAlive = true;
       } catch (_) {}
 
-      const sessionJson = execFileSync("osascript", [
-        "-l", "JavaScript", "-e",
-        'ObjC.import("ApplicationServices"); ObjC.import("CoreGraphics"); const s = $.CGSessionCopyCurrentDictionary(); const session = s ? ObjC.deepUnwrap(ObjC.castRefToObject(s)) : {}; const display = $.CGMainDisplayID(); JSON.stringify({ onConsole: session.kCGSSessionOnConsoleKey === true, loginDone: session.kCGSessionLoginDoneKey === true, uid: session.kCGSSessionUserIDKey, width: Number($.CGDisplayPixelsWide(display)), height: Number($.CGDisplayPixelsHigh(display)) })',
-      ], { encoding: "utf8", timeout: 5000 });
-      const session = JSON.parse(sessionJson);
-      guiSessionActive = windowServerAlive && session.onConsole && session.loginDone &&
-        session.uid === process.getuid?.() && !process.env.CI && !process.env.GITHUB_ACTIONS;
-      coregraphicsReady = session.width > 0 && session.height > 0;
+      const screenInfo = await adapter.getScreenInfo?.().catch(() => null);
+      coregraphicsReady = Boolean(screenInfo && screenInfo.main_display.width > 0 && screenInfo.main_display.height > 0);
+      guiSessionActive =
+        windowServerAlive &&
+        coregraphicsReady &&
+        !process.env.CI &&
+        !process.env.GITHUB_ACTIONS;
 
       const textEditCandidates = [
         "/System/Applications/TextEdit.app",

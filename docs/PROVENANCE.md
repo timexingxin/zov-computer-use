@@ -1,6 +1,6 @@
 # Code Provenance & Clean-Room Attributions (docs/PROVENANCE.md)
 
-Every file and module in `zcode-desktop-control` adheres to strict open-source provenance standards. Proprietary binaries, extracted app bundles, and decompiled code are strictly forbidden.
+Every file and module in `macos-computer-use-kit` adheres to strict open-source provenance standards. Proprietary binaries, extracted app bundles, and decompiled code are strictly forbidden.
 
 ---
 
@@ -16,7 +16,7 @@ Each module in this repository is categorized under the following classification
 | Subsystem / Module | Provenance Class | Origin & Legal Justification |
 | :--- | :---: | :--- |
 | `packages/core` | **A** | 100% original TypeScript implementation of stable handles, compact tree reducers, and error taxonomy. |
-| `packages/platform-macos` | **A / C** | Clean-room implementation using Apple public JXA (`Application("System Events")`) and standard `/usr/sbin/screencapture`. Zero proprietary binary dependencies. |
+| `packages/platform-macos` | **A / C** | Clean-room Swift source (`native/macos-ax-helper.swift`, compiled locally via `/usr/bin/swiftc`) using Apple public `ApplicationServices`, `CoreGraphics`, `AppKit`, and `/usr/sbin/screencapture`. Zero proprietary binary dependencies committed to Git. |
 | `packages/platform-windows` | **A / C** | Clean-room implementation using public Windows PowerShell and UIAutomation interfaces. |
 | `packages/platform-linux` | **A / C** | Clean-room implementation using public AT-SPI2 / X11 structures. |
 | `packages/mcp-server` | **A / C** | Clean-room implementation based on the open Anthropic Model Context Protocol (MCP) specification. |

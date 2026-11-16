@@ -1,8 +1,10 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   type ActionResult,
@@ -10,6 +12,7 @@ import {
   type AppRef,
   type AppState,
   type ClickOptions,
+  type KeyOptions,
   type PermissionReport,
   type PlatformAdapter,
   type ScrollOptions,
@@ -27,97 +30,109 @@ import {
 } from "@zcode-community/core";
 
 const execFile = promisify(execFileCallback);
+const MAX_RETAINED_STATES = 64;
+
+function resolveNativeHelperPath(): string {
+  const distDir = dirname(fileURLToPath(import.meta.url));
+  return join(distDir, "bin", "macos-ax-helper");
+}
 
 export class MacOSAdapter implements PlatformAdapter {
   readonly platform = "darwin" as const;
-  readonly status = "partial" as const;
+  readonly status = "verified" as const;
 
   private activeStates = new Map<string, { appRef: AppRef; tree: UIElement[] }>();
+  private helperPath = resolveNativeHelperPath();
 
-  /**
-   * Executes JavaScript for Automation (JXA) with JSON input/output.
-   */
-  private async runJXA<T>(script: string): Promise<T> {
+  private async runHelper<T>(args: string[], timeoutMs = 15000): Promise<T> {
+    if (!existsSync(this.helperPath)) {
+      throw new ComputerUseError(
+        `Native macOS AX helper binary not found at ${this.helperPath}. Run 'npm run build' on macOS first.`,
+        "operation_failed"
+      );
+    }
+
     try {
-      const { stdout } = await execFile("osascript", ["-l", "JavaScript", "-e", script]);
+      const { stdout } = await execFile(this.helperPath, args, {
+        timeout: timeoutMs,
+        maxBuffer: 16 * 1024 * 1024,
+      });
       const trimmed = stdout.trim();
       if (!trimmed) return undefined as unknown as T;
-      return JSON.parse(trimmed);
+      return JSON.parse(trimmed) as T;
     } catch (err: any) {
-      throw new ComputerUseError(`JXA execution failed: ${err.message}`, "operation_failed");
+      const rawOut = typeof err?.stdout === "string" ? err.stdout.trim() : "";
+      if (rawOut) {
+        try {
+          const parsed = JSON.parse(rawOut);
+          if (parsed && typeof parsed === "object" && parsed.error) {
+            if (parsed.code === "stale_handle") {
+              throw new StaleHandleError("ax_path", undefined);
+            }
+            if (parsed.code === "app_not_found") {
+              throw new AppNotFoundError(String(parsed.error));
+            }
+            throw new ComputerUseError(String(parsed.error), String(parsed.code || "operation_failed"), false, false);
+          }
+        } catch (inner) {
+          if (inner instanceof ComputerUseError) throw inner;
+        }
+      }
+      throw new ComputerUseError(`macOS AX helper failed: ${err.message}`, "operation_failed", false, false);
     }
   }
 
+  private rememberState(stateId: string, record: { appRef: AppRef; tree: UIElement[] }): void {
+    if (this.activeStates.has(stateId)) {
+      this.activeStates.delete(stateId);
+    }
+    this.activeStates.set(stateId, record);
+    while (this.activeStates.size > MAX_RETAINED_STATES) {
+      const oldestKey = this.activeStates.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.activeStates.delete(oldestKey);
+    }
+  }
+
+  private async resolveAppFromAppRef(appRef?: AppRef): Promise<AppInfo | undefined> {
+    if (!appRef) return undefined;
+    const apps = await this.listApps();
+    if (typeof appRef.pid === "number" && appRef.pid > 0) {
+      const byPid = apps.find((a) => a.pid === appRef.pid);
+      if (byPid) return byPid;
+      return { pid: appRef.pid, name: appRef.name || String(appRef.pid), bundle_id: appRef.bundle_id, active: false };
+    }
+    if (appRef.bundle_id) {
+      const found = apps.find((a) => a.bundle_id?.toLowerCase() === appRef.bundle_id!.toLowerCase());
+      if (found) return found;
+    }
+    if (appRef.name) {
+      const lower = appRef.name.toLowerCase();
+      const exact = apps.find((a) => a.name.toLowerCase() === lower);
+      if (exact) return exact;
+      const partial = apps.find((a) => a.name.toLowerCase().includes(lower));
+      if (partial) return partial;
+    }
+    throw new AppNotFoundError(appRef.name || appRef.bundle_id || String(appRef.pid || "unknown"));
+  }
+
+  private async resolvePidFromAppRef(appRef?: AppRef): Promise<number | undefined> {
+    const app = await this.resolveAppFromAppRef(appRef);
+    return app?.pid;
+  }
+
   async listApps(): Promise<AppInfo[]> {
-    const script = `
-      const sys = Application("System Events");
-      const procs = sys.processes();
-      const results = [];
-      for (let i = 0; i < procs.length; i++) {
-        const p = procs[i];
-        try {
-          const bg = p.backgroundOnly();
-          if (!bg) {
-            results.push({
-              pid: p.unixId(),
-              name: p.name(),
-              bundle_id: p.bundleIdentifier ? p.bundleIdentifier() : undefined,
-              active: p.frontmost(),
-              windows_count: p.windows.length
-            });
-          }
-        } catch (_) {}
-      }
-      JSON.stringify(results);
-    `;
-    return this.runJXA<AppInfo[]>(script);
+    return this.runHelper<AppInfo[]>(["list-apps"]);
   }
 
   async listWindows(appRef?: AppRef): Promise<WindowInfo[]> {
-    const script = `
-      ObjC.import("CoreGraphics");
-      const raw = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0);
-      const nsArr = ObjC.castRefToObject(raw);
-      const count = nsArr.count;
-      const results = [];
-      
-      for (let i = 0; i < count; i++) {
-        const item = nsArr.objectAtIndex(i);
-        const pid = ObjC.unwrap(item.objectForKey("kCGWindowOwnerPID"));
-        const owner = ObjC.unwrap(item.objectForKey("kCGWindowOwnerName")) || "";
-        const title = ObjC.unwrap(item.objectForKey("kCGWindowName")) || "";
-        const wid = ObjC.unwrap(item.objectForKey("kCGWindowNumber"));
-        const b = item.objectForKey("kCGWindowBounds");
-        
-        let bounds = { x: 0, y: 0, width: 0, height: 0 };
-        if (b) {
-          bounds = {
-            x: Math.round(ObjC.unwrap(b.objectForKey("X")) || 0),
-            y: Math.round(ObjC.unwrap(b.objectForKey("Y")) || 0),
-            width: Math.round(ObjC.unwrap(b.objectForKey("Width")) || 0),
-            height: Math.round(ObjC.unwrap(b.objectForKey("Height")) || 0)
-          };
-        }
-
-        // Filter out zero-size windows or background helper overlays
-        if (bounds.width > 10 && bounds.height > 10) {
-          results.push({
-            id: wid,
-            pid: pid,
-            title: title,
-            app_name: owner,
-            bounds: bounds,
-            is_minimized: false,
-            is_focused: i === 0
-          });
-        }
-      }
-      JSON.stringify(results);
-    `;
-
-    const windows = await this.runJXA<WindowInfo[]>(script);
     if (appRef?.pid) {
-      return windows.filter((w) => w.pid === appRef.pid);
+      return this.runHelper<WindowInfo[]>(["list-windows", "--pid", String(appRef.pid)]);
+    }
+    const windows = await this.runHelper<WindowInfo[]>(["list-windows"]);
+    if (appRef?.bundle_id) {
+      const lower = appRef.bundle_id.toLowerCase();
+      return windows.filter((w) => w.bundle_id?.toLowerCase() === lower);
     }
     if (appRef?.name) {
       const lower = appRef.name.toLowerCase();
@@ -135,126 +150,58 @@ export class MacOSAdapter implements PlatformAdapter {
     appRef: AppRef,
     options: { detail?: "compact" | "full"; include_screenshot?: boolean } = {}
   ): Promise<AppState> {
-    let resolvedApp: AppInfo | undefined;
-    const runningApps = await this.listApps();
-
-    if (appRef.pid) {
-      resolvedApp = runningApps.find((a) => a.pid === appRef.pid);
-    } else if (appRef.name) {
-      resolvedApp = runningApps.find((a) => a.name.toLowerCase() === appRef.name!.toLowerCase());
-    } else if (appRef.bundle_id) {
-      resolvedApp = runningApps.find((a) => a.bundle_id === appRef.bundle_id);
-    }
-
-    if (!resolvedApp) {
+    const pid = await this.resolvePidFromAppRef(appRef);
+    if (!pid) {
       throw new AppNotFoundError(appRef.name || String(appRef.pid || appRef.bundle_id));
     }
 
-    const script = `
-      const sys = Application("System Events");
-      const proc = sys.processes.whose({ unixId: ${resolvedApp.pid} })[0];
-      if (!proc) {
-        JSON.stringify({ elements: [] });
-      } else {
-        function inspectNode(uiElem, depth) {
-          if (depth > 6) return null;
-          try {
-            const role = uiElem.role() || "unknown";
-            let subrole = undefined;
-            try { subrole = uiElem.subrole ? uiElem.subrole() : undefined; } catch (_) {}
-            
-            let identifier = undefined;
-            try { identifier = uiElem.identifier ? uiElem.identifier() : undefined; } catch (_) {}
+    const helperArgs = ["inspect", "--pid", String(pid), "--max-depth", "20", "--max-nodes", "3000"];
+    if (appRef.window_id) {
+      helperArgs.push("--window-id", String(appRef.window_id));
+    }
 
-            const name = uiElem.name() || uiElem.title() || "";
-            let val = undefined;
-            try {
-              const rawVal = uiElem.value();
-              if (rawVal !== null && rawVal !== undefined) val = String(rawVal);
-            } catch (_) {}
+    const data = await this.runHelper<{
+      app: AppInfo;
+      active_window?: WindowInfo;
+      elements: UIElement[];
+    }>(helperArgs);
 
-            let bounds = undefined;
-            try {
-              const pos = uiElem.position();
-              const sz = uiElem.size();
-              bounds = { x: Math.round(pos[0]), y: Math.round(pos[1]), width: Math.round(sz[0]), height: Math.round(sz[1]) };
-            } catch (_) {}
-
-            const caps = [];
-            const acts = [];
-            try {
-              const rawActs = uiElem.actions();
-              for (let a of rawActs) acts.push(a.name());
-              if (acts.includes("AXPress") || acts.includes("press")) caps.push("pressable");
-              if (acts.includes("AXConfirm")) caps.push("confirmable");
-              if (acts.includes("AXShowMenu")) caps.push("has_menu");
-            } catch (_) {}
-
-            if (["AXTextField", "AXTextArea"].includes(role)) caps.push("editable");
-            if (["AXCheckBox", "AXRadioButton"].includes(role)) caps.push("checkable");
-
-            let enabled = true;
-            try { enabled = uiElem.enabled ? uiElem.enabled() : true; } catch (_) {}
-            let focused = false;
-            try { focused = uiElem.focused ? uiElem.focused() : false; } catch (_) {}
-
-            let children = [];
-            try {
-              const rawChildren = uiElem.uiElements ? uiElem.uiElements() : [];
-              for (let c of rawChildren) {
-                const childNode = inspectNode(c, depth + 1);
-                if (childNode) children.push(childNode);
-              }
-            } catch (_) {}
-
-            return {
-              role: role.replace(/^AX/, "").toLowerCase(),
-              subrole: subrole ? subrole.replace(/^AX/, "").toLowerCase() : undefined,
-              identifier: identifier,
-              name: name,
-              value: val,
-              bounds: bounds,
-              enabled: enabled,
-              focused: focused,
-              capabilities: caps,
-              actions: acts,
-              children: children.length > 0 ? children : undefined
-            };
-          } catch (_) {
-            return null;
-          }
-        }
-
-        const wins = proc.windows();
-        const rootElements = [];
-        for (let w of wins) {
-          const wNode = inspectNode(w, 0);
-          if (wNode) rootElements.push(wNode);
-        }
-        JSON.stringify({ elements: rootElements });
-      }
-    `;
-
-    const data = await this.runJXA<{ elements: any[] }>(script);
-    const windowId = appRef.window_id ?? resolvedApp.pid;
+    const windowId = appRef.window_id ?? data.active_window?.id ?? pid;
     const tree = assignHandlesToTree(windowId, data.elements || []);
 
+    const canonicalRef: AppRef = {
+      pid: data.app.pid,
+      name: data.app.name,
+      bundle_id: data.app.bundle_id,
+      window_id: appRef.window_id ?? data.active_window?.id,
+    };
+
     const stateId = `s_${randomUUID().slice(0, 8)}`;
-    this.activeStates.set(stateId, { appRef, tree });
+    this.rememberState(stateId, { appRef: canonicalRef, tree });
 
     let screenshotBase64: string | undefined;
     if (options.include_screenshot) {
       try {
-        const shot = await this.takeScreenshot({ window_id: appRef.window_id });
+        const shot = await this.takeScreenshot({ window_id: canonicalRef.window_id });
         screenshotBase64 = shot.base64;
       } catch (_) {}
     }
 
+    let totalNodes = 0;
+    const countWalk = (nodes: UIElement[]) => {
+      for (const n of nodes) {
+        totalNodes++;
+        if (n.children) countWalk(n.children);
+      }
+    };
+    countWalk(tree);
+
     return {
       state_id: stateId,
-      app: resolvedApp,
+      app: data.app,
+      active_window: data.active_window,
       tree,
-      element_count: tree.length,
+      element_count: totalNodes,
       timestamp: Date.now(),
       screenshot_base64: screenshotBase64,
     };
@@ -280,7 +227,6 @@ export class MacOSAdapter implements PlatformAdapter {
 
       let width = 1920;
       let height = 1080;
-      // Parse real PNG dimensions from IHDR chunk (bytes 16..24)
       if (
         buffer.length >= 24 &&
         buffer[0] === 0x89 &&
@@ -308,164 +254,92 @@ export class MacOSAdapter implements PlatformAdapter {
     main_display: { width: number; height: number; scale: number };
     platform: string;
   }> {
-    const script = `
-      ObjC.import("CoreGraphics");
-      ObjC.import("AppKit");
-      const mainDisp = $.CGMainDisplayID();
-      const w = $.CGDisplayPixelsWide(mainDisp);
-      const h = $.CGDisplayPixelsHigh(mainDisp);
-      const scale = $.NSScreen.mainScreen ? $.NSScreen.mainScreen.backingScaleFactor : 2;
-      
-      let maxDisplays = 16;
-      let displayList = $.malloc(maxDisplays * 4);
-      let countRef = $.Ref();
-      $.CGGetActiveDisplayList(maxDisplays, displayList, countRef);
-      const displayCount = countRef[0] || 1;
-
-      JSON.stringify({
-        displays: displayCount,
-        main_display: { width: w, height: h, scale: scale },
-        platform: "darwin"
-      });
-    `;
-    return this.runJXA(script);
+    return this.runHelper(["screen-info"]);
   }
 
   async launchApp(nameOrBundleId: string, activate = true): Promise<AppInfo> {
-    const flag = nameOrBundleId.includes(".") ? "-b" : "-a";
-    await execFile("open", [flag, nameOrBundleId]);
-    await new Promise((r) => setTimeout(r, 600));
-
-    if (activate) {
-      const script = `
-        const sys = Application("System Events");
-        const app = Application("${nameOrBundleId}");
-        app.activate();
-      `;
-      await this.runJXA(script).catch(() => {});
+    const isBundleId = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)+$/.test(nameOrBundleId) && !nameOrBundleId.endsWith(".app");
+    const openArgs = isBundleId ? ["-b", nameOrBundleId] : ["-a", nameOrBundleId];
+    if (!activate) {
+      openArgs.unshift("-g");
     }
+    await execFile("open", openArgs);
+    await new Promise((r) => setTimeout(r, 500));
 
     const apps = await this.listApps();
+    const cleaned = nameOrBundleId.replace(/\.app$/i, "").toLowerCase();
     const app = apps.find(
       (a) =>
+        a.name.toLowerCase() === cleaned ||
         a.name.toLowerCase() === nameOrBundleId.toLowerCase() ||
         a.bundle_id?.toLowerCase() === nameOrBundleId.toLowerCase()
     );
-    return app || { pid: 0, name: nameOrBundleId, active: true };
+    return app || { pid: 0, name: nameOrBundleId, active: activate };
   }
 
   async focusApp(appRef: AppRef): Promise<boolean> {
-    const identifier = appRef.bundle_id || appRef.name;
-    if (!identifier) return false;
-    const script = `
-      const app = Application("${identifier}");
-      app.activate();
-      true;
-    `;
-    return this.runJXA<boolean>(script).catch(() => false);
+    const pid = await this.resolvePidFromAppRef(appRef).catch(() => undefined);
+    if (!pid) return false;
+    const res = await this.runHelper<{ ok: boolean }>(["focus-app", "--pid", String(pid)]).catch(() => ({ ok: false }));
+    return Boolean(res?.ok);
   }
 
   async focusWindow(windowId: number): Promise<boolean> {
-    const script = `
-      ObjC.import("CoreGraphics");
-      ObjC.import("AppKit");
-      const raw = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0);
-      const nsArr = ObjC.castRefToObject(raw);
-      for (let i = 0; i < nsArr.count; i++) {
-        const item = nsArr.objectAtIndex(i);
-        if (ObjC.unwrap(item.objectForKey("kCGWindowNumber")) === ${windowId}) {
-          const pid = ObjC.unwrap(item.objectForKey("kCGWindowOwnerPID"));
-          const sys = Application("System Events");
-          const proc = sys.processes.whose({ unixId: pid })[0];
-          if (proc) {
-            proc.frontmost = true;
-            return true;
-          }
-        }
-      }
-      false;
-    `;
-    return this.runJXA<boolean>(script).catch(() => false);
+    const res = await this.runHelper<{ ok: boolean }>([
+      "window-op",
+      "--op", "focus",
+      "--window-id", String(windowId),
+    ]).catch(() => ({ ok: false }));
+    return Boolean(res?.ok);
   }
 
-  async moveWindow(_windowId: number, x: number, y: number): Promise<boolean> {
-    const script = `
-      const sys = Application("System Events");
-      const procs = sys.processes();
-      for (let p of procs) {
-        try {
-          const wins = p.windows();
-          if (wins.length > 0) {
-            wins[0].position = [${x}, ${y}];
-            return true;
-          }
-        } catch (_) {}
-      }
-      false;
-    `;
-    return this.runJXA<boolean>(script).catch(() => false);
+  async moveWindow(windowId: number, x: number, y: number): Promise<boolean> {
+    const res = await this.runHelper<{ ok: boolean }>([
+      "window-op",
+      "--op", "move",
+      "--window-id", String(windowId),
+      "--x", String(Math.round(x)),
+      "--y", String(Math.round(y)),
+    ]).catch(() => ({ ok: false }));
+    return Boolean(res?.ok);
   }
 
-  async resizeWindow(_windowId: number, width: number, height: number): Promise<boolean> {
-    const script = `
-      const sys = Application("System Events");
-      const procs = sys.processes();
-      for (let p of procs) {
-        try {
-          const wins = p.windows();
-          if (wins.length > 0) {
-            wins[0].size = [${width}, ${height}];
-            return true;
-          }
-        } catch (_) {}
-      }
-      false;
-    `;
-    return this.runJXA<boolean>(script).catch(() => false);
+  async resizeWindow(windowId: number, width: number, height: number): Promise<boolean> {
+    const res = await this.runHelper<{ ok: boolean }>([
+      "window-op",
+      "--op", "resize",
+      "--window-id", String(windowId),
+      "--width", String(Math.round(width)),
+      "--height", String(Math.round(height)),
+    ]).catch(() => ({ ok: false }));
+    return Boolean(res?.ok);
   }
 
-  async minimizeWindow(_windowId: number): Promise<boolean> {
-    const script = `
-      const sys = Application("System Events");
-      const front = sys.processes.whose({ frontmost: true })[0];
-      if (front && front.windows.length > 0) {
-        front.windows[0].miniaturized = true;
-        true;
-      } else {
-        false;
-      }
-    `;
-    return this.runJXA<boolean>(script).catch(() => false);
+  async minimizeWindow(windowId: number): Promise<boolean> {
+    const res = await this.runHelper<{ ok: boolean }>([
+      "window-op",
+      "--op", "minimize",
+      "--window-id", String(windowId),
+    ]).catch(() => ({ ok: false }));
+    return Boolean(res?.ok);
   }
 
-  async maximizeWindow(_windowId: number): Promise<boolean> {
-    const script = `
-      const sys = Application("System Events");
-      const front = sys.processes.whose({ frontmost: true })[0];
-      if (front && front.windows.length > 0) {
-        const btn = front.windows[0].buttons.whose({ subrole: "AXZoomButton" })[0];
-        if (btn) {
-          btn.click();
-          true;
-        } else {
-          false;
-        }
-      } else {
-        false;
-      }
-    `;
-    return this.runJXA<boolean>(script).catch(() => false);
+  async maximizeWindow(windowId: number): Promise<boolean> {
+    const res = await this.runHelper<{ ok: boolean }>([
+      "window-op",
+      "--op", "maximize",
+      "--window-id", String(windowId),
+    ]).catch(() => ({ ok: false }));
+    return Boolean(res?.ok);
   }
 
   async movePointer(x: number, y: number): Promise<ActionResult> {
-    const script = `
-      ObjC.import("CoreGraphics");
-      const pt = $.CGPointMake(${x}, ${y});
-      const ev = $.CGEventCreateMouseEvent(null, $.kCGEventMouseMoved, pt, $.kCGMouseButtonLeft);
-      $.CGEventPost($.kCGHIDEventTap, ev);
-      true;
-    `;
-    await this.runJXA(script);
+    await this.runHelper([
+      "pointer-op",
+      "--op", "move",
+      "--x", String(Math.round(x)),
+      "--y", String(Math.round(y)),
+    ]);
     return {
       ok: true,
       action: "move_pointer",
@@ -477,23 +351,20 @@ export class MacOSAdapter implements PlatformAdapter {
   async click(target: Target, options: ClickOptions = {}): Promise<ActionResult> {
     const button = options.button || "left";
     const clickCount = options.clickCount || 1;
+    const strategy = options.strategy || "auto";
+    const mods = options.modifiers || [];
 
-    let targetX = 0;
-    let targetY = 0;
-
-    if (target.type === "coordinate") {
-      targetX = target.x;
-      targetY = target.y;
-    } else if (target.type === "element") {
+    if (target.type === "element") {
       const stateId = target.state_id;
       if (!stateId || !this.activeStates.has(stateId)) {
         throw new StaleHandleError(target.handle ?? target.index ?? "unknown", stateId);
       }
-      const { tree } = this.activeStates.get(stateId)!;
+
+      const { appRef, tree } = this.activeStates.get(stateId)!;
       const resolved = resolveElementWithAmbiguity(tree, target);
       if (resolved.ambiguous) {
         throw new AmbiguousElementError(
-          `Target matched ${resolved.count} elements. Specify a unique handle or AXIdentifier.`,
+          `Target matched ${resolved.count} elements. Specify a unique index or AXIdentifier handle.`,
           []
         );
       }
@@ -502,50 +373,127 @@ export class MacOSAdapter implements PlatformAdapter {
       }
 
       const elem = resolved.element;
-      if (elem.bounds && elem.bounds.width > 0 && elem.bounds.height > 0) {
-        targetX = Math.round(elem.bounds.x + elem.bounds.width / 2);
-        targetY = Math.round(elem.bounds.y + elem.bounds.height / 2);
-      } else {
-        // Fall back to AXPress action
-        return this.performElementAction(target, "AXPress");
+      const advertisesAXPress =
+        elem.actions.includes("AXPress") ||
+        elem.actions.includes("press") ||
+        elem.capabilities.includes("pressable");
+      const canUseAXPress =
+        strategy !== "event" &&
+        advertisesAXPress &&
+        button === "left" &&
+        clickCount === 1 &&
+        mods.length === 0 &&
+        Array.isArray(elem.ax_path) &&
+        appRef.pid;
+
+      // 1. Background-first semantic AXPress ONLY when element truly advertises AXPress
+      //    (prevents Qt6 QCocoaAccessibilityElement silent AXError=0 no-ops on AXRaise-only controls)
+      if (canUseAXPress) {
+        try {
+          await this.runHelper([
+            "act-element",
+            "--pid", String(appRef.pid),
+            "--path", JSON.stringify(elem.ax_path),
+            "--action", "AXPress",
+            "--expected-role", elem.role,
+          ]);
+          return {
+            ok: true,
+            action: "click",
+            action_sent: true,
+            receipt: `Dispatched background AXPress on ${elem.role} "${elem.name}" (pid=${appRef.pid}, zero focus steal)`,
+            target,
+          };
+        } catch (axErr: any) {
+          if (axErr instanceof StaleHandleError) {
+            throw axErr;
+          }
+          if (strategy === "a11y") {
+            const shortcutHint = elem.description ? ` (hint: ${elem.description})` : "";
+            throw new ComputerUseError(
+              `Element ${elem.role} "${elem.name}" failed native AXPress${shortcutHint}: ${axErr.message}`,
+              "action_unavailable",
+              false,
+              false
+            );
+          }
+          // Under strategy="auto", fall through to occlusion-verified coordinate click
+        }
+      } else if (strategy === "a11y") {
+        const actsInfo = elem.actions.length > 0 ? elem.actions.join(", ") : "none";
+        const shortcutHint = elem.description ? `; ${elem.description}` : "";
+        throw new ComputerUseError(
+          `Element ${elem.role} "${elem.name}" does not advertise AXPress (actions: [${actsInfo}]${shortcutHint}). Retry with strategy="auto" or "event" when unoccluded.`,
+          "action_unavailable",
+          false,
+          false
+        );
       }
+
+      // 2. Occlusion-verified coordinate fallback for controls without native AXPress (e.g. QtWebEngine)
+      if (!elem.bounds || elem.bounds.width <= 0 || elem.bounds.height <= 0) {
+        throw new ComputerUseError(
+          `Element ${elem.role} "${elem.name}" lacks valid screen bounds for coordinate click`,
+          "action_unavailable",
+          false,
+          false
+        );
+      }
+
+      const targetX = Math.round(elem.bounds.x + elem.bounds.width / 2);
+      const targetY = Math.round(elem.bounds.y + elem.bounds.height / 2);
+      const coordArgs = [
+        "click-coord",
+        "--x", String(targetX),
+        "--y", String(targetY),
+        "--button", button,
+        "--count", String(clickCount),
+        "--restore-cursor", "1",
+      ];
+      if (mods.length > 0) {
+        coordArgs.push("--modifiers", mods.join(","));
+      }
+      if (appRef.pid) {
+        coordArgs.push("--require-pid", String(appRef.pid));
+      }
+
+      await this.runHelper(coordArgs);
+      return {
+        ok: true,
+        action: "click",
+        action_sent: true,
+        receipt: `Dispatched occlusion-verified ${button} click (${clickCount}x) on ${elem.role} "${elem.name}" at (${targetX}, ${targetY})`,
+        target,
+      };
     }
 
-    // CoreGraphics Real Event Click
-    const script = `
-      ObjC.import("CoreGraphics");
-      const pt = $.CGPointMake(${targetX}, ${targetY});
-      let downType = $.kCGEventLeftMouseDown;
-      let upType = $.kCGEventLeftMouseUp;
-      let btn = $.kCGMouseButtonLeft;
+    // Coordinate target
+    if (strategy === "a11y") {
+      throw new ComputerUseError(
+        `strategy="a11y" requires an element target`,
+        "invalid_argument",
+        false,
+        false
+      );
+    }
 
-      if ("${button}" === "right") {
-        downType = $.kCGEventRightMouseDown;
-        upType = $.kCGEventRightMouseUp;
-        btn = $.kCGMouseButtonRight;
-      } else if ("${button}" === "middle") {
-        downType = $.kCGEventOtherMouseDown;
-        upType = $.kCGEventOtherMouseUp;
-        btn = $.kCGMouseButtonCenter;
-      }
+    const coordArgs = [
+      "click-coord",
+      "--x", String(target.x),
+      "--y", String(target.y),
+      "--button", button,
+      "--count", String(clickCount),
+    ];
+    if (mods.length > 0) {
+      coordArgs.push("--modifiers", mods.join(","));
+    }
 
-      const downEv = $.CGEventCreateMouseEvent(null, downType, pt, btn);
-      const upEv = $.CGEventCreateMouseEvent(null, upType, pt, btn);
-      if (${clickCount} > 1) {
-        $.CGEventSetIntegerValueField(downEv, $.kCGMouseEventClickState, ${clickCount});
-        $.CGEventSetIntegerValueField(upEv, $.kCGMouseEventClickState, ${clickCount});
-      }
-      $.CGEventPost($.kCGHIDEventTap, downEv);
-      $.CGEventPost($.kCGHIDEventTap, upEv);
-      true;
-    `;
-    await this.runJXA(script);
-
+    await this.runHelper(coordArgs);
     return {
       ok: true,
       action: "click",
       action_sent: true,
-      receipt: `Dispatched CoreGraphics ${button} click (${clickCount}x) at (${targetX}, ${targetY})`,
+      receipt: `Dispatched CoreGraphics ${button} click (${clickCount}x) at (${target.x}, ${target.y})`,
       target,
     };
   }
@@ -563,23 +511,7 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async mouseDown(button: "left" | "right" | "middle" = "left"): Promise<ActionResult> {
-    const script = `
-      ObjC.import("CoreGraphics");
-      const pos = $.CGEventGetLocation($.CGEventCreate(null));
-      let downType = $.kCGEventLeftMouseDown;
-      let btn = $.kCGMouseButtonLeft;
-      if ("${button}" === "right") {
-        downType = $.kCGEventRightMouseDown;
-        btn = $.kCGMouseButtonRight;
-      } else if ("${button}" === "middle") {
-        downType = $.kCGEventOtherMouseDown;
-        btn = $.kCGMouseButtonCenter;
-      }
-      const ev = $.CGEventCreateMouseEvent(null, downType, pos, btn);
-      $.CGEventPost($.kCGHIDEventTap, ev);
-      true;
-    `;
-    await this.runJXA(script);
+    await this.runHelper(["pointer-op", "--op", "down", "--button", button]);
     return {
       ok: true,
       action: "mouse_down",
@@ -589,23 +521,7 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async mouseUp(button: "left" | "right" | "middle" = "left"): Promise<ActionResult> {
-    const script = `
-      ObjC.import("CoreGraphics");
-      const pos = $.CGEventGetLocation($.CGEventCreate(null));
-      let upType = $.kCGEventLeftMouseUp;
-      let btn = $.kCGMouseButtonLeft;
-      if ("${button}" === "right") {
-        upType = $.kCGEventRightMouseUp;
-        btn = $.kCGMouseButtonRight;
-      } else if ("${button}" === "middle") {
-        upType = $.kCGEventOtherMouseUp;
-        btn = $.kCGMouseButtonCenter;
-      }
-      const ev = $.CGEventCreateMouseEvent(null, upType, pos, btn);
-      $.CGEventPost($.kCGHIDEventTap, ev);
-      true;
-    `;
-    await this.runJXA(script);
+    await this.runHelper(["pointer-op", "--op", "up", "--button", button]);
     return {
       ok: true,
       action: "mouse_up",
@@ -615,24 +531,16 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async drag(toX: number, toY: number, fromX?: number, fromY?: number): Promise<ActionResult> {
+    const args = [
+      "pointer-op",
+      "--op", "drag",
+      "--to-x", String(Math.round(toX)),
+      "--to-y", String(Math.round(toY)),
+    ];
     if (fromX !== undefined && fromY !== undefined) {
-      await this.movePointer(fromX, fromY);
+      args.push("--from-x", String(Math.round(fromX)), "--from-y", String(Math.round(fromY)));
     }
-    const script = `
-      ObjC.import("CoreGraphics");
-      const startPos = $.CGEventGetLocation($.CGEventCreate(null));
-      const endPos = $.CGPointMake(${toX}, ${toY});
-
-      const down = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, startPos, $.kCGMouseButtonLeft);
-      const drag = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDragged, endPos, $.kCGMouseButtonLeft);
-      const up = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, endPos, $.kCGMouseButtonLeft);
-
-      $.CGEventPost($.kCGHIDEventTap, down);
-      $.CGEventPost($.kCGHIDEventTap, drag);
-      $.CGEventPost($.kCGHIDEventTap, up);
-      true;
-    `;
-    await this.runJXA(script);
+    await this.runHelper(args);
     return {
       ok: true,
       action: "left_click_drag",
@@ -645,13 +553,12 @@ export class MacOSAdapter implements PlatformAdapter {
     const deltaY = options.deltaY ?? (options.direction === "up" ? -100 : options.direction === "down" ? 100 : 0);
     const deltaX = options.deltaX ?? (options.direction === "left" ? -100 : options.direction === "right" ? 100 : 0);
 
-    const script = `
-      ObjC.import("CoreGraphics");
-      const ev = $.CGEventCreateScrollWheelEvent2(null, $.kCGScrollEventUnitPixel, 2, ${deltaY}, ${deltaX}, 0);
-      $.CGEventPost($.kCGHIDEventTap, ev);
-      true;
-    `;
-    await this.runJXA(script);
+    await this.runHelper([
+      "pointer-op",
+      "--op", "scroll",
+      "--delta-y", String(Math.round(deltaY)),
+      "--delta-x", String(Math.round(deltaX)),
+    ]);
     return {
       ok: true,
       action: "scroll",
@@ -660,67 +567,109 @@ export class MacOSAdapter implements PlatformAdapter {
     };
   }
 
-  async typeText(text: string, _options?: TypeOptions, target?: Target): Promise<ActionResult> {
+  async typeText(text: string, options?: TypeOptions, target?: Target): Promise<ActionResult> {
     if (target) {
-      await this.click(target);
-      await new Promise((r) => setTimeout(r, 100));
+      if (target.type === "element" && options?.strategy !== "event") {
+        // Try semantic setValue first if target is editable
+        try {
+          return await this.setValue(target, text);
+        } catch (_) {
+          await this.click(target, { strategy: options?.strategy });
+          await new Promise((r) => setTimeout(r, 80));
+        }
+      } else {
+        await this.click(target, { strategy: options?.strategy });
+        await new Promise((r) => setTimeout(r, 80));
+      }
     }
 
-    const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const appleScript = `tell application "System Events" to keystroke "${escaped}"`;
-    await execFile("osascript", ["-e", appleScript]);
+    const resolvedApp = options?.appRef ? await this.resolveAppFromAppRef(options.appRef) : undefined;
+    if (options?.strategy === "a11y" && !target) {
+      throw new ComputerUseError(
+        `type/type_text with strategy="a11y" requires an editable element target (or use set_value)`,
+        "action_unavailable",
+        false,
+        false
+      );
+    }
+    if (options?.strategy === "event" && resolvedApp && !resolvedApp.active) {
+      throw new ComputerUseError(
+        `Target app "${resolvedApp.name}" (pid=${resolvedApp.pid}) is not frontmost; activate first or omit strategy="event"`,
+        "foreground_required",
+        false,
+        false
+      );
+    }
 
+    const helperArgs = ["type-unicode", "--text", text];
+    const useBackgroundPid = resolvedApp && !resolvedApp.active && options?.strategy !== "event";
+    if (useBackgroundPid) {
+      helperArgs.push("--pid", String(resolvedApp.pid));
+    }
+
+    await this.runHelper(helperArgs);
     return {
       ok: true,
       action: "type_text",
       action_sent: true,
-      receipt: `Typed ${text.length} characters`,
+      receipt: useBackgroundPid
+        ? `Typed ${text.length} characters via background postToPid=${resolvedApp.pid} (target_active=false)`
+        : `Typed ${text.length} characters`,
       target,
     };
   }
 
-  async pressKey(key: string, modifiers: string[] = []): Promise<ActionResult> {
-    const macMods = modifiers
-      .map((m) => {
-        const l = m.toLowerCase();
-        if (l === "command" || l === "cmd") return "command down";
-        if (l === "control" || l === "ctrl") return "control down";
-        if (l === "alt" || l === "option") return "option down";
-        if (l === "shift") return "shift down";
-        return null;
-      })
-      .filter(Boolean);
+  async pressKey(key: string, modifiers: string[] = [], options?: KeyOptions): Promise<ActionResult> {
+    if (options?.strategy === "a11y") {
+      throw new ComputerUseError(
+        `key/press_key does not support strategy="a11y"; use perform_action or strategy="auto"/"event"`,
+        "action_unavailable",
+        false,
+        false
+      );
+    }
 
-    const usingClause = macMods.length > 0 ? ` using {${macMods.join(", ")}}` : "";
-    const keyLower = key.toLowerCase();
+    const resolvedApp = options?.appRef ? await this.resolveAppFromAppRef(options.appRef) : undefined;
+    if (options?.strategy === "event" && resolvedApp && !resolvedApp.active) {
+      throw new ComputerUseError(
+        `Target app "${resolvedApp.name}" (pid=${resolvedApp.pid}) is not frontmost; activate first before strategy="event" key dispatch`,
+        "foreground_required",
+        false,
+        false
+      );
+    }
 
-    let asCmd = `keystroke "${key}"${usingClause}`;
-    if (keyLower === "enter" || keyLower === "return") asCmd = `key code 36${usingClause}`;
-    else if (keyLower === "escape" || keyLower === "esc") asCmd = `key code 53${usingClause}`;
-    else if (keyLower === "tab") asCmd = `key code 48${usingClause}`;
-    else if (keyLower === "backspace" || keyLower === "delete") asCmd = `key code 51${usingClause}`;
-    else if (keyLower === "space") asCmd = `key code 49${usingClause}`;
-    else if (keyLower === "up") asCmd = `key code 126${usingClause}`;
-    else if (keyLower === "down") asCmd = `key code 125${usingClause}`;
-    else if (keyLower === "left") asCmd = `key code 123${usingClause}`;
-    else if (keyLower === "right") asCmd = `key code 124${usingClause}`;
+    const helperArgs = ["key", "--key", key];
+    if (modifiers.length > 0) {
+      helperArgs.push("--modifiers", modifiers.join(","));
+    }
+    if (options?.repeat && options.repeat > 1) {
+      helperArgs.push("--repeat", String(options.repeat));
+    }
+    // When target app is already active/frontmost, use full HID tap so Qt6/WebEngine receives keys reliably;
+    // when target app is in the background, use postToPid so user's active window is never polluted.
+    const useBackgroundPid = resolvedApp && !resolvedApp.active && options?.strategy !== "event";
+    if (useBackgroundPid) {
+      helperArgs.push("--pid", String(resolvedApp.pid));
+    }
 
-    const appleScript = `tell application "System Events" to ${asCmd}`;
-    await execFile("osascript", ["-e", appleScript]);
-
+    await this.runHelper(helperArgs);
+    const modDesc = modifiers.length ? ` with ${modifiers.join("+")}` : "";
     return {
       ok: true,
       action: "press_key",
       action_sent: true,
-      receipt: `Pressed key: ${key}${modifiers.length ? ` with ${modifiers.join("+")}` : ""}`,
+      receipt: useBackgroundPid
+        ? `Pressed key: ${key}${modDesc} (background postToPid=${resolvedApp.pid}, target_active=false; note Qt6 apps ignore background keys unless active)`
+        : `Pressed key: ${key}${modDesc}${resolvedApp ? ` (frontmost pid=${resolvedApp.pid})` : ""}`,
     };
   }
 
-  async hotkey(keys: string[]): Promise<ActionResult> {
+  async hotkey(keys: string[], options?: KeyOptions): Promise<ActionResult> {
     if (keys.length === 0) throw new ComputerUseError("Hotkey requires at least one key", "invalid_argument");
     const mainKey = keys[keys.length - 1];
     const modifiers = keys.slice(0, keys.length - 1);
-    return this.pressKey(mainKey, modifiers);
+    return this.pressKey(mainKey, modifiers, options);
   }
 
   async setValue(target: Target, value: string): Promise<ActionResult> {
@@ -760,59 +709,40 @@ export class MacOSAdapter implements PlatformAdapter {
     }
 
     const elem = resolved.element;
-    const escapedName = (elem.name || "").replace(/"/g, '\\"');
-    const pid = appRef.pid;
+    if (!appRef.pid || !Array.isArray(elem.ax_path)) {
+      throw new ComputerUseError(
+        `Element "${elem.name}" has no native AX path bound in state ${stateId}`,
+        "operation_failed"
+      );
+    }
 
-    if (action === "setValue" && value !== undefined) {
-      const script = `
-        const sys = Application("System Events");
-        const proc = sys.processes.whose({ unixId: ${pid} })[0];
-        if (proc && proc.windows.length > 0) {
-          const w = proc.windows[0];
-          const textFields = w.textFields.whose({ name: "${escapedName}" });
-          if (textFields.length > 0) {
-            textFields[0].value = "${value.replace(/"/g, '\\"')}";
-            true;
-          } else {
-            throw new Error("TextField '${escapedName}' not found in front window");
-          }
-        } else {
-          throw new Error("No process or window found for pid ${pid}");
-        }
-      `;
-      await this.runJXA(script);
+    const helperArgs = [
+      "act-element",
+      "--pid", String(appRef.pid),
+      "--path", JSON.stringify(elem.ax_path),
+      "--action", action,
+      "--expected-role", elem.role,
+    ];
+    if (value !== undefined) {
+      helperArgs.push("--value", value);
+    }
+
+    await this.runHelper(helperArgs);
+
+    if (action === "setValue") {
       return {
         ok: true,
         action: "set_value",
         action_sent: true,
-        receipt: `Set value of "${elem.name}" to "${value}"`,
+        receipt: `Set value of ${elem.role} "${elem.name}" to "${value}" (pid=${appRef.pid}, zero focus steal)`,
       };
     }
-
-    // Generic AXPress
-    const script = `
-      const sys = Application("System Events");
-      const proc = sys.processes.whose({ unixId: ${pid} })[0];
-      if (proc && proc.windows.length > 0) {
-        const w = proc.windows[0];
-        const buttons = w.buttons.whose({ name: "${escapedName}" });
-        if (buttons.length > 0) {
-          buttons[0].click();
-          true;
-        } else {
-          throw new Error("Element '${escapedName}' not found in front window");
-        }
-      } else {
-        throw new Error("No process or window found for pid ${pid}");
-      }
-    `;
-    await this.runJXA(script);
 
     return {
       ok: true,
       action: "perform_action",
       action_sent: true,
-      receipt: `Executed ${action} on ${elem.role} "${elem.name}"`,
+      receipt: `Executed ${action} on ${elem.role} "${elem.name}" (pid=${appRef.pid}, zero focus steal)`,
     };
   }
 
@@ -835,37 +765,19 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async checkPermissions(): Promise<PermissionReport> {
-    let accessibility = false;
-    let screenRecording = false;
     try {
-      const { stdout } = await execFile("osascript", [
-        "-e",
-        'tell application "System Events" to return count of processes',
-      ], { timeout: 10000 });
-      const { stdout: trusted } = await execFile("osascript", [
-        "-l", "JavaScript", "-e",
-        'ObjC.import("ApplicationServices"); Boolean($.AXIsProcessTrusted())',
-      ], { timeout: 10000 });
-      accessibility = parseInt(stdout.trim(), 10) > 0 && trusted.trim() === "true";
-    } catch { /* Unknown permission state fails closed. */ }
-
-    // CGPreflightScreenCaptureAccess does not request permission. A missing
-    // Swift toolchain leaves the strict GUI preflight unready rather than
-    // reporting a permission that was never checked.
-    try {
-      const { stdout } = await execFile("/usr/bin/swift", [
-        "-e", 'import CoreGraphics; print(CGPreflightScreenCaptureAccess() ? "granted" : "denied")',
-      ], { timeout: 20000 });
-      screenRecording = stdout.trim() === "granted";
-    } catch { /* Unknown permission state fails closed. */ }
-
-    return { accessibility, screen_recording: screenRecording };
+      const res = await this.runHelper<{ accessibility: boolean; screen_recording: boolean }>(["permissions"], 5000);
+      return {
+        accessibility: Boolean(res?.accessibility),
+        screen_recording: Boolean(res?.screen_recording),
+      };
+    } catch {
+      return { accessibility: false, screen_recording: false };
+    }
   }
 
   async requestAccess(_types?: ("accessibility" | "screen_recording")[]): Promise<PermissionReport> {
-    try {
-      await execFile("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]);
-    } catch (_) {}
+    // Strictly read-only per zcode-computer-use contract: never pop System Settings windows
     return this.checkPermissions();
   }
 }

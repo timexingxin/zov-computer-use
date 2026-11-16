@@ -121,3 +121,46 @@ test("Turnkey installer deploys skills, open-source MCP runtime, runs live stdio
     rmSync(fakeHome, { recursive: true, force: true });
   }
 });
+
+test("Installer auto-selects open mode on ZCode >= 3.18.0 and honors --preserve-skills", () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "macos-cua-kit-v318-"));
+  try {
+    // Simulate ZCode 3.18.2 helper metadata + legacy cached 0.5.14 plugin + stale visible bridge
+    const zcodeMetaDir = join(fakeHome, ".zcode", "computer-use");
+    const zcodePluginDir = join(fakeHome, ".zcode", "cli", "plugins", "cache", "zcode-plugins-official", "computer-use", "0.5.14", "dist", "mcp");
+    mkdirSync(zcodeMetaDir, { recursive: true });
+    mkdirSync(zcodePluginDir, { recursive: true });
+    writeFileSync(join(zcodeMetaDir, ".zcode-cua-helper-meta.json"), JSON.stringify({ version: "3.18.2" }), "utf-8");
+    writeFileSync(join(zcodePluginDir, "server.js"), "// legacy", "utf-8");
+
+    const agySkillsDir = join(fakeHome, ".gemini", "config", "skills", "zcode-computer-use");
+    mkdirSync(agySkillsDir, { recursive: true });
+    const customSkillText = "---\nname: zcode-computer-use\ndescription: Custom\n---\nCUSTOM_USER_RULES";
+    writeFileSync(join(agySkillsDir, "SKILL.md"), customSkillText, "utf-8");
+
+    const mcpCfgPath = join(fakeHome, ".gemini", "config", "mcp_config.json");
+    writeFileSync(
+      mcpCfgPath,
+      JSON.stringify({
+        mcpServers: {
+          "zcode-cua-visible": { command: "node", args: ["/old/zcode-cua-visible-bridge.mjs"] },
+        },
+      }),
+      "utf-8"
+    );
+
+    const out = execFileSync(
+      process.execPath,
+      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--mode", "auto", "--preserve-skills", "--skip-probe"],
+      { cwd: repoRoot, encoding: "utf-8" }
+    );
+    assert.match(out, /Backend Mode : open/);
+
+    const updatedCfg = JSON.parse(readFileSync(mcpCfgPath, "utf-8"));
+    assert.ok(updatedCfg.mcpServers["zcode-cua"].args[0].endsWith("runtime/dist/bin/server.js"));
+    assert.equal(updatedCfg.mcpServers["zcode-cua-visible"], undefined, "Stale visible bridge must be pruned");
+    assert.equal(readFileSync(join(agySkillsDir, "SKILL.md"), "utf-8"), customSkillText, "Custom SKILL.md must be preserved");
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});

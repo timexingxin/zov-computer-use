@@ -125,14 +125,16 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "left_click",
-    description: "Legacy alias for click with left button.",
+    description: "Left-click a semantic element (preferred, background zero-focus AXPress first) or coordinate target.",
     inputSchema: {
       type: "object",
       properties: {
         target: { type: "object" },
+        app_ref: { type: "object" },
+        modifiers: { type: "string" },
         clickCount: { type: "number", default: 1 },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
-        return_state: { type: "string", enum: ["compact"] },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["target"],
     },
@@ -220,14 +222,53 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "left_click_drag",
-    description: "Click and drag from current position to (x, y) coordinates.",
+    description: "Click and drag from optional (fromX, fromY) or current position to (toX/x, toY/y) coordinates.",
     inputSchema: {
       type: "object",
       properties: {
         x: { type: "number" },
         y: { type: "number" },
+        toX: { type: "number" },
+        toY: { type: "number" },
+        fromX: { type: "number" },
+        fromY: { type: "number" },
       },
-      required: ["x", "y"],
+    },
+  },
+  {
+    name: "mouse_down",
+    description: "Press and hold a mouse button at the current pointer location.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
+      },
+    },
+  },
+  {
+    name: "left_mouse_down",
+    description: "Alias for mouse_down with left button.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "mouse_up",
+    description: "Release a held mouse button at the current pointer location.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
+      },
+    },
+  },
+  {
+    name: "left_mouse_up",
+    description: "Alias for mouse_up with left button.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
 
@@ -247,42 +288,53 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "type",
-    description: "Legacy alias for type_text.",
+    description: "Type text into a target element (semantic setValue first) or background app_ref.",
     inputSchema: {
       type: "object",
       properties: {
         text: { type: "string" },
         target: { type: "object" },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["text"],
     },
   },
   {
     name: "press_key",
-    description: "Press a keyboard key (e.g. Return, Escape, Tab, Backspace, Space, ArrowDown) with optional modifiers.",
+    description: "Press a keyboard key (e.g. Return, Escape, Tab, Backspace, Space, ArrowDown) with optional modifiers and background app_ref.",
     inputSchema: {
       type: "object",
       properties: {
         key: { type: "string" },
+        text: { type: "string" },
+        app_ref: { type: "object" },
+        repeat: { type: "number" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
         modifiers: {
           type: "array",
           items: { type: "string" },
           description: "e.g. ['cmd'], ['ctrl'], ['alt'], ['shift']",
         },
       },
-      required: ["key"],
     },
   },
   {
     name: "key",
-    description: "Legacy alias for press_key.",
+    description: "Press a key or chord (e.g. text='return', text='3', text='cmd+s') scoped to background app_ref (postToPid, zero focus steal) or foreground.",
     inputSchema: {
       type: "object",
       properties: {
+        text: { type: "string" },
         key: { type: "string" },
+        app_ref: { type: "object" },
+        repeat: { type: "number" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
         modifiers: { type: "array", items: { type: "string" } },
       },
-      required: ["key"],
     },
   },
   {
@@ -292,8 +344,24 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       type: "object",
       properties: {
         keys: { type: "array", items: { type: "string" } },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
       },
       required: ["keys"],
+    },
+  },
+  {
+    name: "hold_key",
+    description: "Press a keyboard key with optional modifiers and background app_ref.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string" },
+        text: { type: "string" },
+        modifiers: { type: "array", items: { type: "string" } },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+      },
     },
   },
   {
@@ -338,14 +406,15 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "open_application",
-    description: "Legacy alias for launch_app.",
+    description: "Launch or activate an application by name, bundle_id, or pid.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string" },
+        bundle_id: { type: "string" },
+        pid: { type: "number" },
         activate: { type: "boolean", default: true },
       },
-      required: ["name"],
     },
   },
   {

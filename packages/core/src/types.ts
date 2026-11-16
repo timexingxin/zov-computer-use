@@ -47,12 +47,14 @@ export interface UIElement {
   subrole?: string;
   identifier?: string;
   name: string;
+  description?: string;
   value?: string;
   bounds?: Rectangle;
   enabled?: boolean;
   focused?: boolean;
   capabilities: string[];
   actions: string[];
+  ax_path?: number[];
   children?: UIElement[];
   ambiguous?: boolean;
   ambiguity_count?: number;
@@ -63,6 +65,7 @@ export interface CompactUIElement {
   h: string; // handle
   r: string; // role
   n: string; // name
+  d?: string; // description / shortcut hint
   v?: string; // value
   c: string[]; // capabilities
 }
@@ -131,6 +134,13 @@ export interface ClickOptions {
 export interface TypeOptions {
   strategy?: "auto" | "a11y" | "event";
   clearFirst?: boolean;
+  appRef?: AppRef;
+}
+
+export interface KeyOptions {
+  appRef?: AppRef;
+  repeat?: number;
+  strategy?: "auto" | "a11y" | "event";
 }
 
 export interface ScrollOptions {
@@ -185,8 +195,8 @@ export interface PlatformAdapter {
   movePointer(x: number, y: number): Promise<ActionResult>;
   scroll(options: ScrollOptions): Promise<ActionResult>;
   typeText(text: string, options?: TypeOptions, target?: Target): Promise<ActionResult>;
-  pressKey(key: string, modifiers?: string[]): Promise<ActionResult>;
-  hotkey(keys: string[]): Promise<ActionResult>;
+  pressKey(key: string, modifiers?: string[], options?: KeyOptions): Promise<ActionResult>;
+  hotkey(keys: string[], options?: KeyOptions): Promise<ActionResult>;
   setValue(target: Target, value: string): Promise<ActionResult>;
   performAction(target: Target, actionName: string): Promise<ActionResult>;
   

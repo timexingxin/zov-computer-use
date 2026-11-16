@@ -17,11 +17,12 @@
    - **`computer-use-orchestrator`**：总控路由与安全策略层——遵循“API/CLI 优先 → 网页走浏览器 DOM 工具 → 原生 Mac 应用走 AX 无障碍语义树”，内置单写入者窗口锁、非焦点窗口安全关闭（`AXCloseButton`）以及异常恢复规则。
    - **`zcode-computer-use`**：具体工具执行协议——规范 `Observe → Act → Verify` 闭环、状态质量分级（GOOD / DEGRADED / FAILED）、`return_state="compact"` 单轮原子刷新、macOS 原生文件选择框（`⌘⇧G`）处理、高危动作护栏，并附带零依赖只读验收探针 `scripts/rpc_probe.py`。
 2. **内置纯开源 macOS AX MCP 服务端（`packages/`）**
-   - 零闭源二进制、零第三方运行时依赖，直接调用 macOS 原生无障碍树（AX API）与 `CoreGraphics`。
-   - 提供 30+ 标准工具（`list_apps`、`list_windows`、`get_app_state`、`left_click`/`click`、`set_value`、`perform_action`、`open_application`/`launch_app`、`screenshot`、`request_access`、`stop_computer_control`、剪贴板读写及紧凑/增量状态压缩）。
-3. **可选 ZCode 原生桥接器（`bridges/`）**
-   - **未安装 `ZCode.app` 的普通 Mac（默认）**：`zcode-cua` 自动指向内置纯开源 macOS AX MCP 服务端，装完直接可用。
-   - **已安装 `ZCode.app` 的 Mac（自动识别增强）**：自动挂载 `zcode-cua-bridge.mjs`（零焦点原生 Helper）和 `zcode-cua-visible-bridge.mjs`（`GhostCursor` 可视化光标轨迹），同时保留 `cua-open` 纯开源后端作为备选。
+   - 零闭源二进制、零第三方运行时依赖，安装时通过本机 `/usr/bin/swiftc` 编译原生 `ApplicationServices` + `CoreGraphics` 引擎（`macos-ax-helper`），无需触发 `System Events` 自动化弹窗。
+   - 支持最高 20 层深层无障碍树毫秒级采集（兼容 AppKit/SwiftUI、Electron、Chromium、WebKit 及 QtWebEngine）、后台零焦点 `AXPress`、针对无原生 `AXPress` 控件（如 Qt6/Anki）的遮挡校验坐标兜底、`postToPid` 后台按键及密码框自动脱敏（`[REDACTED_PASSWORD]`）。
+   - 提供 40+ 标准工具（`list_apps`、`list_windows`、`get_app_state`、`left_click`/`click`、`set_value`、`perform_action`、`open_application`/`launch_app`、`screenshot`、`request_access`、`stop_computer_control`、剪贴板读写及紧凑/增量状态压缩）。
+3. **可选旧版 ZCode 桥接器（`bridges/`）**
+   - **默认模式（未安装 `ZCode.app` 或已升级至限制外部 `verifyPeer` 桥接的 `ZCode >= 3.18.0`）**：`zcode-cua` 自动指向内置纯开源原生 macOS AX MCP 服务端，开箱即用且不受第三方客户端升级影响。
+   - **旧版 `ZCode < 3.18.0` 环境**：支持挂载 `zcode-cua-bridge.mjs` 与 `zcode-cua-visible-bridge.mjs`，同时保留 `cua-open` 开源后端备选。
 
 ---
 
@@ -64,6 +65,7 @@ cd macos-computer-use-kit
 ./install.sh --client cursor                  # 仅安装到 Cursor (~/.cursor)
 ./install.sh --client all                     # 同时安装到以上全部客户端
 ./install.sh --mode open                      # 强制使用内置纯开源 macOS AX MCP 后端
+./install.sh --preserve-skills                # 仅升级运行时，保留已自定义的 SKILL.md 不被覆盖
 ./install.sh --dry-run                        # 仅预览将要修改的路径，不实际写入文件
 ./install.sh --uninstall                      # 干净卸载本套件安装的 Skills、运行时与 MCP 配置项
 ```

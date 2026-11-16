@@ -35,6 +35,7 @@ function parseArgs(argv) {
     dryRun: false,
     uninstall: false,
     skipProbe: false,
+    preserveSkills: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -47,13 +48,15 @@ function parseArgs(argv) {
     else if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--uninstall") opts.uninstall = true;
     else if (a === "--skip-probe") opts.skipProbe = true;
+    else if (a === "--preserve-skills") opts.preserveSkills = true;
     else if (a === "--help" || a === "-h") {
       console.log(`Usage: ./install.sh [options]
 
 Options:
   --client <auto|antigravity|claude|cursor|all>   Target AI agent client (default: auto)
-  --mode <auto|open|zcode|both>                   Backend mode (default: auto)
+  --mode <auto|open|zcode|both>                   Backend mode (default: auto -> open native AX)
   --home <path>                                   Override target HOME directory
+  --preserve-skills                               Keep existing SKILL.md files if already customized
   --dry-run                                       Preview actions without modifying files
   --skip-probe                                    Skip post-install MCP stdio probe
   --uninstall                                     Remove installed kit skills, runtime, and MCP entries
@@ -75,6 +78,21 @@ function hasZCodeInstallation(targetHome) {
   const hasApp = appCandidates.some((p) => existsSync(p));
   const cacheDir = join(targetHome, ".zcode/cli/plugins/cache/zcode-plugins-official/computer-use");
   if (!hasApp || !existsSync(cacheDir)) return false;
+
+  // ZCode >= 3.18.0 blocks external ELECTRON_RUN_AS_NODE bridge connections via verifyPeer.
+  const helperMetaPath = join(targetHome, ".zcode/computer-use/.zcode-cua-helper-meta.json");
+  if (existsSync(helperMetaPath)) {
+    try {
+      const meta = JSON.parse(readFileSync(helperMetaPath, "utf-8"));
+      const [maj = 0, min = 0] = String(meta.version || "0.0.0").split(".").map(Number);
+      if (maj > 3 || (maj === 3 && min >= 18)) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
   try {
     return readdirSync(cacheDir).some((v) => {
       const p = join(cacheDir, v, "dist/mcp/server.js");
@@ -260,8 +278,24 @@ function main() {
       mkdirSync(t.skillsDir, { recursive: true });
       for (const skillName of ["computer-use-orchestrator", "zcode-computer-use"]) {
         const destSkill = join(t.skillsDir, skillName);
+        const existingSkillMd = join(destSkill, "SKILL.md");
+        const templateSkillMd = join(rootDir, "skills", skillName, "SKILL.md");
+        if (opts.preserveSkills && existsSync(existingSkillMd)) {
+          console.log(`[2/3] Preserved customized skill -> ${existingSkillMd}`);
+          continue;
+        }
+        let prevSkillContent = null;
+        if (existsSync(existingSkillMd)) {
+          const cur = readFileSync(existingSkillMd, "utf-8");
+          const next = readFileSync(templateSkillMd, "utf-8");
+          if (cur !== next) prevSkillContent = cur;
+        }
         rmSync(destSkill, { recursive: true, force: true });
         cpSync(join(rootDir, "skills", skillName), destSkill, { recursive: true });
+        if (prevSkillContent !== null) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          writeFileSync(join(destSkill, `SKILL.md.bak-${stamp}`), prevSkillContent, "utf-8");
+        }
       }
       const probeScript = join(t.skillsDir, "zcode-computer-use", "scripts", "rpc_probe.py");
       if (existsSync(probeScript)) chmodSync(probeScript, 0o755);
@@ -275,6 +309,12 @@ function main() {
 
     if (effectiveMode === "open") {
       cfg.mcpServers["zcode-cua"] = openServerEntry;
+      if (
+        cfg.mcpServers["zcode-cua-visible"] &&
+        JSON.stringify(cfg.mcpServers["zcode-cua-visible"]).includes("zcode-cua-visible-bridge")
+      ) {
+        delete cfg.mcpServers["zcode-cua-visible"];
+      }
     } else if (effectiveMode === "zcode") {
       cfg.mcpServers["zcode-cua"] = zcodeBridgeEntry;
       cfg.mcpServers["zcode-cua-visible"] = zcodeVisibleEntry;

@@ -7,10 +7,11 @@ import type { UIElement } from "./types.js";
  */
 export function generateStrongHandle(
   windowId: number | string,
-  element: { role: string; identifier: string }
+  element: { role: string; identifier: string; name?: string }
 ): string {
   const normRole = (element.role || "unknown").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const rawKey = `strong|${windowId}|${normRole}|${element.identifier.trim()}`;
+  const normName = (element.name || "").trim().toLowerCase();
+  const rawKey = `strong|${windowId}|${normRole}|${element.identifier.trim()}|${normName}`;
   const hash = createHash("sha256").update(rawKey, "utf8").digest("hex").slice(0, 10);
   return `h_str_${normRole}_${hash}`;
 }
@@ -43,7 +44,11 @@ export function generateElementHandle(
   ancestorRoleChain = ""
 ): string {
   if (element.identifier && element.identifier.trim().length > 0) {
-    return generateStrongHandle(windowId, { role: element.role, identifier: element.identifier });
+    return generateStrongHandle(windowId, {
+      role: element.role,
+      identifier: element.identifier,
+      name: element.name,
+    });
   }
   return generateWeakHandle(windowId, element, ancestorRoleChain);
 }
@@ -159,7 +164,8 @@ export function resolveElementWithAmbiguity(
   if (matches.length === 0) {
     return { count: 0 };
   }
-  if (matches.length === 1 && !matches[0].ambiguous) {
+  const matchedByUniqueIndex = matcher.index !== undefined && !matcher.handle && !matcher.name;
+  if (matches.length === 1 && (matchedByUniqueIndex || !matches[0].ambiguous)) {
     return { element: matches[0], ambiguous: false, count: 1 };
   }
   return { element: matches[0], ambiguous: true, count: matches.length };

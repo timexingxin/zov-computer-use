@@ -7,6 +7,7 @@ import {
   UnsupportedPlatformError,
   computeStateDiff,
   getPlatformCapabilities,
+  redactElementSecrets,
   reduceToCompactState,
 } from "@zcode-community/core";
 import { MacOSAdapter } from "@zcode-community/platform-macos";
@@ -27,6 +28,8 @@ export function createPlatformAdapter(): PlatformAdapter {
   }
 }
 
+const MAX_RETAINED_STATES = 64;
+
 export class MCPServer {
   private adapter: PlatformAdapter;
   private lastStateMap = new Map<string, any>();
@@ -35,6 +38,18 @@ export class MCPServer {
 
   constructor(adapter?: PlatformAdapter) {
     this.adapter = adapter || createPlatformAdapter();
+  }
+
+  private rememberStateMapping(stateId: string, appRef: any): void {
+    if (this.stateIdToAppRef.has(stateId)) {
+      this.stateIdToAppRef.delete(stateId);
+    }
+    this.stateIdToAppRef.set(stateId, appRef);
+    while (this.stateIdToAppRef.size > MAX_RETAINED_STATES) {
+      const oldest = this.stateIdToAppRef.keys().next().value;
+      if (oldest === undefined) break;
+      this.stateIdToAppRef.delete(oldest);
+    }
   }
 
   getAdapter(): PlatformAdapter {
@@ -122,16 +137,26 @@ export class MCPServer {
 
       case "get_app_state": {
         const detail = args.detail || "compact";
-        const state = await this.adapter.getAppState(args.app_ref, {
+        const rawState = await this.adapter.getAppState(args.app_ref, {
           detail: detail === "full" ? "full" : "compact",
           include_screenshot: args.include_screenshot,
         });
+        const state = {
+          ...rawState,
+          tree: Array.isArray(rawState.tree) ? rawState.tree.map(redactElementSecrets) : [],
+        };
 
         const appKey = args.app_ref?.name || String(args.app_ref?.pid || "default");
         const prevState = this.lastStateMap.get(appKey);
+        if (this.lastStateMap.has(appKey)) this.lastStateMap.delete(appKey);
         this.lastStateMap.set(appKey, state);
+        while (this.lastStateMap.size > MAX_RETAINED_STATES) {
+          const oldestAppKey = this.lastStateMap.keys().next().value;
+          if (oldestAppKey === undefined) break;
+          this.lastStateMap.delete(oldestAppKey);
+        }
         if (state?.state_id && args.app_ref) {
-          this.stateIdToAppRef.set(state.state_id, args.app_ref);
+          this.rememberStateMapping(state.state_id, args.app_ref);
         }
 
         if (detail === "compact") {
@@ -155,17 +180,28 @@ export class MCPServer {
       // --- Pointer ---
       case "click":
       case "left_click": {
+        const modsRaw = args.modifiers;
+        const parsedMods = Array.isArray(modsRaw)
+          ? modsRaw
+          : typeof modsRaw === "string" && modsRaw.trim()
+            ? modsRaw.split("+").map((s: string) => s.trim())
+            : undefined;
         const clickReceipt = await this.adapter.click(args.target, {
           clickCount: args.clickCount || 1,
           button: args.button || "left",
           strategy: args.strategy,
+          modifiers: parsedMods,
         });
-        if (args.return_state === "compact" && args.target?.state_id) {
-          const ref = this.stateIdToAppRef.get(args.target.state_id);
+        if ((args.return_state === "compact" || args.return_state === "full") && args.target?.state_id) {
+          const ref = this.stateIdToAppRef.get(args.target.state_id) || args.app_ref;
           if (ref) {
-            const fresh = await this.adapter.getAppState(ref, { detail: "compact" });
-            if (fresh?.state_id) this.stateIdToAppRef.set(fresh.state_id, ref);
-            return { ...clickReceipt, compact_state: reduceToCompactState(fresh) };
+            const fresh = await this.adapter.getAppState(ref, {
+              detail: args.return_state === "full" ? "full" : "compact",
+            });
+            if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, ref);
+            return args.return_state === "full"
+              ? { ...clickReceipt, state: fresh }
+              : { ...clickReceipt, compact_state: reduceToCompactState(fresh) };
           }
         }
         return clickReceipt;
@@ -212,18 +248,66 @@ export class MCPServer {
 
       // --- Text & Keyboard ---
       case "type_text":
-      case "type":
-        return await this.adapter.typeText(args.text, args, args.target);
+      case "type": {
+        const typeReceipt = await this.adapter.typeText(
+          args.text,
+          { strategy: args.strategy, clearFirst: args.clearFirst, appRef: args.app_ref },
+          args.target
+        );
+        if ((args.return_state === "compact" || args.return_state === "full") && args.app_ref) {
+          const fresh = await this.adapter.getAppState(args.app_ref, {
+            detail: args.return_state === "full" ? "full" : "compact",
+          });
+          if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, args.app_ref);
+          return args.return_state === "full"
+            ? { ...typeReceipt, state: fresh }
+            : { ...typeReceipt, compact_state: reduceToCompactState(fresh) };
+        }
+        return typeReceipt;
+      }
 
       case "press_key":
-      case "key":
-        return await this.adapter.pressKey(args.key, args.modifiers);
+      case "key": {
+        const keyInput = args.key ?? args.text;
+        if (!keyInput || typeof keyInput !== "string") {
+          throw new ComputerUseError("key/press_key requires a 'key' or 'text' string", "invalid_argument");
+        }
+        if (typeof args.repeat === "number" && args.repeat === 0) {
+          return { ok: true, action: "press_key", action_sent: false, receipt: "repeat=0 no-op" };
+        }
+        if (typeof args.repeat === "number" && args.repeat < 0) {
+          throw new ComputerUseError("Negative repeat is refused", "invalid_argument");
+        }
+        const keyReceipt = await this.adapter.pressKey(keyInput, args.modifiers, {
+          appRef: args.app_ref,
+          repeat: typeof args.repeat === "number" ? args.repeat : undefined,
+          strategy: args.strategy,
+        });
+        if ((args.return_state === "compact" || args.return_state === "full") && args.app_ref) {
+          const fresh = await this.adapter.getAppState(args.app_ref, {
+            detail: args.return_state === "full" ? "full" : "compact",
+          });
+          if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, args.app_ref);
+          return args.return_state === "full"
+            ? { ...keyReceipt, state: fresh }
+            : { ...keyReceipt, compact_state: reduceToCompactState(fresh) };
+        }
+        return keyReceipt;
+      }
 
       case "hotkey":
-        return await this.adapter.hotkey(args.keys || []);
+        return await this.adapter.hotkey(args.keys || [], {
+          appRef: args.app_ref,
+          strategy: args.strategy,
+        });
 
-      case "hold_key":
-        return await this.adapter.pressKey(args.key, args.modifiers);
+      case "hold_key": {
+        const holdKeyInput = args.key ?? args.text;
+        return await this.adapter.pressKey(holdKeyInput, args.modifiers, {
+          appRef: args.app_ref,
+          strategy: args.strategy,
+        });
+      }
 
       case "set_value": {
         const valReceipt = await this.adapter.setValue(args.target, args.value);
@@ -231,7 +315,7 @@ export class MCPServer {
           const ref = this.stateIdToAppRef.get(args.target.state_id);
           if (ref) {
             const fresh = await this.adapter.getAppState(ref, { detail: "compact" });
-            if (fresh?.state_id) this.stateIdToAppRef.set(fresh.state_id, ref);
+            if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, ref);
             return { ...valReceipt, compact_state: reduceToCompactState(fresh) };
           }
         }
@@ -243,8 +327,20 @@ export class MCPServer {
 
       // --- Window & App ---
       case "launch_app":
-      case "open_application":
-        return await this.adapter.launchApp(args.name, args.activate ?? true);
+      case "open_application": {
+        if (args.pid && !args.name && !args.bundle_id) {
+          if (args.activate ?? true) {
+            await this.adapter.focusApp({ pid: args.pid });
+          }
+          const apps = await this.adapter.listApps();
+          return apps.find((a) => a.pid === args.pid) || { pid: args.pid, name: String(args.pid), active: Boolean(args.activate ?? true) };
+        }
+        const targetIdent = args.bundle_id || args.name;
+        if (!targetIdent) {
+          throw new ComputerUseError("open_application requires 'name', 'bundle_id', or 'pid'", "invalid_argument");
+        }
+        return await this.adapter.launchApp(targetIdent, args.activate ?? true);
+      }
 
       case "focus_app":
         return { ok: await this.adapter.focusApp(args.app_ref) };
@@ -359,7 +455,9 @@ export class MCPServer {
       process.stdout.write(JSON.stringify(msg) + "\n");
     };
 
-    rl.on("line", async (line) => {
+    let requestQueue = Promise.resolve();
+
+    const processLine = async (line: string) => {
       const trimmed = line.trim();
       if (!trimmed) return;
 
@@ -382,8 +480,8 @@ export class MCPServer {
                 tools: { listChanged: false },
               },
               serverInfo: {
-                name: "zcode-desktop-control",
-                version: "0.2.0-alpha.1",
+                name: "macos-computer-use-kit",
+                version: "0.2.0",
               },
             },
           });
@@ -436,6 +534,15 @@ export class MCPServer {
       } catch (err: any) {
         process.stderr.write(`[mcp-server] Error processing JSON-RPC: ${err.message}\n`);
       }
+    };
+
+    // Strictly serialize JSON-RPC execution to uphold single-writer GUI safety
+    rl.on("line", (line) => {
+      requestQueue = requestQueue.then(() => processLine(line));
+    });
+
+    rl.on("close", () => {
+      void requestQueue.finally(() => process.exit(0));
     });
 
     for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {

@@ -131,3 +131,140 @@ test("Red Team 7: Unknown tool name returns standard invalid_argument error", as
   const payload = JSON.parse(res.content[0].text);
   assert.equal(payload.code, "invalid_argument");
 });
+
+test("Red Team 8: Qt6 shared AXIdentifier with distinct names produces unique handles", () => {
+  const qtTree = [
+    {
+      index: 0,
+      handle: "",
+      role: "window",
+      name: "Anki",
+      capabilities: [],
+      actions: ["AXRaise"],
+      children: [
+        {
+          index: 1,
+          handle: "",
+          role: "link",
+          identifier: "QWebEngineNode",
+          name: "ASL",
+          capabilities: ["clickable"],
+          actions: ["AXRaise"],
+        },
+        {
+          index: 2,
+          handle: "",
+          role: "link",
+          identifier: "QWebEngineNode",
+          name: "",
+          capabilities: ["clickable"],
+          actions: ["AXRaise"],
+        },
+      ],
+    },
+  ];
+  const assigned = assignHandlesToTree(32124, qtTree);
+  assert.notEqual(assigned[0].children[0].handle, assigned[0].children[1].handle);
+  assert.equal(assigned[0].children[0].ambiguous, undefined);
+});
+
+test("Red Team 9: AXRaise-only Qt6 element never fake-succeeds under strategy='a11y' and skips AXPress under 'auto'", async () => {
+  const adapter = new MacOSAdapter();
+  const helperCalls = [];
+  adapter.runHelper = async (args) => {
+    helperCalls.push(args);
+    if (args[0] === "click-coord") {
+      return { ok: true, x: 500, y: 300 };
+    }
+    throw new Error("Unexpected helper call: " + args.join(" "));
+  };
+  adapter.activeStates.set("s_qt_test", {
+    appRef: { pid: 32124, name: "Anki" },
+    tree: assignHandlesToTree(32124, [
+      {
+        index: 0,
+        handle: "",
+        role: "link",
+        name: "ASL",
+        bounds: { x: 480, y: 290, width: 40, height: 20 },
+        capabilities: ["clickable"],
+        actions: ["AXRaise"],
+        ax_path: [0, 1, 0],
+      },
+    ]),
+  });
+
+  const server = new MCPServer(adapter);
+
+  // 1. strategy='a11y' must fail closed without calling act-element or click-coord
+  const a11yRes = await server.handleCallTool("left_click", {
+    target: { type: "element", state_id: "s_qt_test", index: 0 },
+    strategy: "a11y",
+  });
+  assert.equal(a11yRes.isError, true);
+  const a11yErr = JSON.parse(a11yRes.content[0].text);
+  assert.equal(a11yErr.code, "action_unavailable");
+  assert.equal(a11yErr.action_sent, false);
+  assert.equal(helperCalls.length, 0, "Must not invoke AXPress on AXRaise-only element");
+
+  // 2. strategy='auto' must skip AXPress and drop straight to occlusion-verified click-coord
+  const autoRes = await server.handleCallTool("left_click", {
+    target: { type: "element", state_id: "s_qt_test", index: 0 },
+    strategy: "auto",
+  });
+  assert.equal(autoRes.isError, undefined);
+  assert.equal(helperCalls.length, 1);
+  assert.equal(helperCalls[0][0], "click-coord");
+  assert.ok(helperCalls[0].includes("--require-pid"));
+});
+
+test("Red Team 10: Password fields (securetextfield) are automatically redacted in full and compact state", async () => {
+  const mockAdapter = {
+    platform: "darwin",
+    async getAppState() {
+      return {
+        state_id: "s_sec_1",
+        app: { pid: 888, name: "LoginApp", active: true },
+        tree: [
+          {
+            index: 0,
+            handle: "h_pwd",
+            role: "textfield",
+            subrole: "securetextfield",
+            name: "Password",
+            value: "SuperSecret123!",
+            capabilities: ["editable"],
+            actions: [],
+          },
+        ],
+        element_count: 1,
+        timestamp: Date.now(),
+      };
+    },
+  };
+  const server = new MCPServer(mockAdapter);
+
+  const compactRes = await server.handleCallTool("get_app_state", {
+    app_ref: { pid: 888 },
+    detail: "compact",
+  });
+  const compact = JSON.parse(compactRes.content[0].text);
+  assert.equal(compact.elements[0].v, "[REDACTED_PASSWORD]");
+  assert.ok(!compactRes.content[0].text.includes("SuperSecret123!"));
+
+  const fullRes = await server.handleCallTool("get_app_state", {
+    app_ref: { pid: 888 },
+    detail: "full",
+  });
+  const full = JSON.parse(fullRes.content[0].text);
+  assert.equal(full.tree[0].value, "[REDACTED_PASSWORD]");
+  assert.ok(!fullRes.content[0].text.includes("SuperSecret123!"));
+});
+
+test("Red Team 11: Newly exposed manifest tools (hold_key, mouse_down, mouse_up) are advertised in tools/list", async () => {
+  const { TOOLS_MANIFEST } = await import("../packages/mcp-server/dist/index.js");
+  const names = new Set(TOOLS_MANIFEST.map((t) => t.name));
+  for (const expected of ["hold_key", "mouse_down", "left_mouse_down", "mouse_up", "left_mouse_up", "left_click_drag"]) {
+    assert.ok(names.has(expected), `TOOLS_MANIFEST must advertise ${expected}`);
+  }
+});

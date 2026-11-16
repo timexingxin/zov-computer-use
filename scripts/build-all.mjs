@@ -58,6 +58,18 @@ for (const pkg of PACKAGES_ORDER) {
 }
 
 if (!isTypecheck) {
+  // Compile native macOS Swift AX helper when building on Darwin with swiftc available
+  if (process.platform === "darwin" && existsSync("/usr/bin/swiftc")) {
+    const swiftSrc = join(rootDir, "packages", "platform-macos", "native", "macos-ax-helper.swift");
+    const swiftBinDir = join(rootDir, "packages", "platform-macos", "dist", "bin");
+    const swiftOut = join(swiftBinDir, "macos-ax-helper");
+    if (existsSync(swiftSrc)) {
+      mkdirSync(swiftBinDir, { recursive: true });
+      execFileSync("/usr/bin/swiftc", ["-O", swiftSrc, "-o", swiftOut], { stdio: "inherit" });
+      chmodSync(swiftOut, 0o755);
+    }
+  }
+
   const serverBin = join(rootDir, "packages", "mcp-server", "dist", "bin", "server.js");
   const cliBin = join(rootDir, "packages", "cli", "bin", "cua.mjs");
   if (existsSync(serverBin)) chmodSync(serverBin, 0o755);

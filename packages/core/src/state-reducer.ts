@@ -9,7 +9,25 @@ import type {
 /**
  * Converts a UIElement into a token-lean CompactUIElement.
  */
+export function redactElementSecrets(elem: UIElement): UIElement {
+  const isSecure =
+    elem.role.toLowerCase() === "securetextfield" ||
+    elem.subrole?.toLowerCase() === "securetextfield";
+  const redactedValue =
+    isSecure && elem.value !== undefined && elem.value !== ""
+      ? "[REDACTED_PASSWORD]"
+      : elem.value;
+  return {
+    ...elem,
+    value: redactedValue,
+    children: elem.children ? elem.children.map(redactElementSecrets) : undefined,
+  };
+}
+
 export function toCompactElement(elem: UIElement): CompactUIElement {
+  const isSecure =
+    elem.role.toLowerCase() === "securetextfield" ||
+    elem.subrole?.toLowerCase() === "securetextfield";
   const compact: CompactUIElement = {
     i: elem.index,
     h: elem.handle,
@@ -17,8 +35,11 @@ export function toCompactElement(elem: UIElement): CompactUIElement {
     n: elem.name,
     c: elem.capabilities || [],
   };
+  if (elem.description !== undefined && elem.description !== "") {
+    compact.d = elem.description;
+  }
   if (elem.value !== undefined && elem.value !== "") {
-    compact.v = elem.value;
+    compact.v = isSecure ? "[REDACTED_PASSWORD]" : elem.value;
   }
   return compact;
 }
@@ -40,8 +61,10 @@ export function flattenAndFilterTree(
       ["button", "textfield", "link", "checkbox", "radiobutton", "menuitem", "tab", "cell"].includes(
         node.role.toLowerCase()
       );
+    const hasReadableText =
+      node.name.trim().length > 0 || (node.value !== undefined && node.value.trim().length > 0);
 
-    if (!filterNonInteractive || isInteractive || node.name.trim().length > 0) {
+    if (!filterNonInteractive || isInteractive || hasReadableText) {
       result.push(toCompactElement(node));
     }
 

@@ -18,11 +18,12 @@ Clone once, run `./install.sh`, grant macOS Accessibility permission, and your a
    - **`computer-use-orchestrator`**: High-level routing discipline—semantic Accessibility (AX) first, background zero-focus execution, single-writer window ownership, safe background window closing (`AXCloseButton`), and fail-closed recovery.
    - **`zcode-computer-use`**: Concrete execution loop (`Observe → Act → Verify`), GOOD/DEGRADED/FAILED state triage, atomic `return_state="compact"` updates, `NSOpenPanel`/`NSSavePanel` (`⌘⇧G`) handling, destructive action guards, and a zero-dependency read-only verifier (`scripts/rpc_probe.py`).
 2. **Self-Contained Open-Source macOS AX MCP Server (`packages/`)**
-   - Zero proprietary binaries and zero runtime npm dependencies—built on native macOS Accessibility (`System Events` / JXA) + `CoreGraphics`.
-   - Exposes 30+ standardized tools (`list_apps`, `list_windows`, `get_app_state`, `left_click`/`click`, `set_value`, `perform_action`, `open_application`/`launch_app`, `screenshot`, `request_access`, `stop_computer_control`, clipboard tools, and compact/diff context compression).
-3. **Optional ZCode Native Helper Bridges (`bridges/`)**
-   - If `ZCode.app` is installed on the Mac, the installer automatically enables `zcode-cua-bridge.mjs` (background zero-focus native helper) and `zcode-cua-visible-bridge.mjs` (`GhostCursor` visual trajectory overlay) while keeping the pure open-source server registered as `cua-open`.
-   - If `ZCode.app` is **not** installed, `zcode-cua` automatically points directly to the built-in open-source macOS AX MCP server—**no third-party app required**.
+   - Zero proprietary binaries and zero runtime npm dependencies—powered by a clean-room native Swift `ApplicationServices` + `CoreGraphics` helper (`macos-ax-helper`, compiled locally during `install.sh` / `npm run build`).
+   - Deep accessibility tree traversal (up to depth 20 in <100ms, supporting native AppKit/SwiftUI, Electron, Chromium, WebKit, and QtWebEngine), zero-focus background `AXPress`, occlusion-verified coordinate fallback for non-`AXPress` controls, `CGEvent.postToPid` background keys, and automatic password-field redaction.
+   - Exposes 40+ standardized tools (`list_apps`, `list_windows`, `get_app_state`, `left_click`/`click`, `set_value`, `perform_action`, `open_application`/`launch_app`, `screenshot`, `request_access`, `stop_computer_control`, clipboard tools, and compact/diff context compression).
+3. **Optional Legacy ZCode Helper Bridges (`bridges/`)**
+   - By default (and on Macs with ZCode >= 3.18.0 where external bridge connections are restricted by `verifyPeer`), `zcode-cua` points directly to the built-in open-source macOS AX MCP server—**no third-party app required**.
+   - On legacy ZCode (< 3.18.0) installations, optional `zcode-cua-bridge.mjs` and `zcode-cua-visible-bridge.mjs` remain available while keeping the open-source server registered as `cua-open`.
 
 ---
 
@@ -65,7 +66,8 @@ Restart or reload MCP servers in your agent client, and you are ready to prompt:
 ./install.sh --client cursor                  # Target Cursor (~/.cursor)
 ./install.sh --client all                     # Install to all supported clients
 ./install.sh --mode open                      # Force pure open-source macOS AX MCP backend
-./install.sh --mode both                      # ZCode Native Helper bridges + open-source fallback
+./install.sh --preserve-skills                # Upgrade runtime without overwriting customized SKILL.md files
+./install.sh --mode both                      # Legacy ZCode (<3.18) bridges + open-source fallback
 ./install.sh --dry-run                        # Preview changes without writing files
 ./install.sh --uninstall                      # Cleanly remove kit skills, runtime & MCP entries
 ```

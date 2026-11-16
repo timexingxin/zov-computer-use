@@ -35,7 +35,7 @@ Observe once, act once, then verify.
 2. **Resolve or Launch App**: `list_apps` lists currently running GUI applications. If the target app is not running, call `open_application` (or `launch_app`) once with the exact application name or bundle identifier (e.g., `{"name": "Calculator"}` or `{"name": "日历"}`).
 3. **Observe Semantic State**: Call `get_app_state` starting with the accessibility tree (`detail="compact"`, without a screenshot).
 4. **Evaluate App State Quality**:
-   - **GOOD STATE**: Contains actionable elements (`pressable`, `editable`, `has_menu`), clear labels, and window bounds. Proceed with semantic element actions (`left_click` / `click`, `set_value`, `perform_action`).
+   - **GOOD STATE**: Contains actionable elements (`pressable` for native background `AXPress`, `clickable` for bounds-verified controls such as QtWebEngine that lack native `AXPress`, `editable`, `has_menu`), clear labels, and window bounds. Proceed with semantic element actions (`left_click` / `click`, `set_value`, `perform_action`).
    - **DEGRADED STATE**: Tree contains only root window/container nodes without interactive children (e.g., custom canvas or loading splash). Request `screenshot` (`include_screenshot=true`) for visual coordinate fallback, or check whether a modal dialog is intercepting input.
    - **FAILED STATE**: `isError: true` or IPC failure. Read the structured error code (`permission_denied`, `stale_handle`, `ambiguous_element`, `operation_failed`) and execute targeted recovery.
 5. **Atomic State Return**: When dispatching mutating element actions (`left_click` / `click`, `set_value`), you may pass `return_state="compact"` to receive a refreshed compact state in a single roundtrip.
