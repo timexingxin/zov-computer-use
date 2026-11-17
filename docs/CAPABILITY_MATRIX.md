@@ -1,5 +1,5 @@
 # Platform Capability & Tool Support Matrix
-> **Version**: `0.2.0`  
+> **Version**: `0.2.1`  
 > **Policy**: **Truthfulness > Tool Count**. No fake success or unexecuted stubs.
 
 This matrix documents the actual runtime support level for all **47 MCP tools** (39 primary tools + 8 aliases) exposed by `@zcode-community/mcp-server`.
@@ -47,7 +47,7 @@ This matrix documents the actual runtime support level for all **47 MCP tools** 
 | 28 | `resize_window` | **IMPLEMENTED** | SKELETON | SKELETON | `audit-regression.test.mjs` (`window_not_found`) | Exact `CGWindowID` + `AXSize` |
 | 29 | `minimize_window` | **IMPLEMENTED** | SKELETON | SKELETON | `audit-regression.test.mjs` (`window_not_found`) | Exact `CGWindowID` + `AXMinimized` |
 | 30 | `maximize_window` | **IMPLEMENTED** | SKELETON | SKELETON | `audit-regression.test.mjs` (`window_not_found`) | Idempotent `AXFullScreen`/`AXZoomButton` |
-| 31 | `find_element` | **VERIFIED (Core)** | SKELETON | SKELETON | `core-handles-reducer.test.mjs` | Compact tree substring + role search |
+| 31 | `find_element` | **VERIFIED (Core)** | SKELETON | SKELETON | `audit-regression.test.mjs` / `core-handles-reducer.test.mjs` | Compact tree substring + role search |
 | 32 | `click_element` | **VERIFIED (Core)** | SKELETON | SKELETON | `audit-regression.test.mjs` (role filter + ambiguity) | Compact tree resolve + `click` |
 | 33 | `set_element_value` | **VERIFIED (Core)** | SKELETON | SKELETON | `audit-regression.test.mjs` (role filter + ambiguity) | Compact tree resolve + `setValue` |
 | 34 | `perform_action` | **IMPLEMENTED** | SKELETON | SKELETON | `audit-regression.test.mjs` (TOCTOU args) | `AXUIElementPerformAction` |

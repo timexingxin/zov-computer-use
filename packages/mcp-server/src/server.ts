@@ -89,6 +89,48 @@ function validateTargetObject(target: any, toolName: string): void {
   }
 }
 
+const VALID_MODIFIERS = new Set([
+  "cmd",
+  "command",
+  "meta",
+  "super",
+  "ctrl",
+  "control",
+  "alt",
+  "option",
+  "opt",
+  "shift",
+]);
+
+function validateModifierTokens(tokens: unknown[], toolName: string): void {
+  for (const tok of tokens) {
+    if (typeof tok !== "string" || !VALID_MODIFIERS.has(tok.trim().toLowerCase())) {
+      throw new InvalidArgumentError(
+        `${toolName}: invalid modifier '${String(tok)}' (expected cmd/ctrl/alt/option/shift)`
+      );
+    }
+  }
+}
+
+function validateAppRefObject(appRef: Record<string, any>, toolName: string): void {
+  if (appRef.pid !== undefined && (!Number.isInteger(appRef.pid) || appRef.pid <= 0)) {
+    throw new InvalidArgumentError(`${toolName}: 'app_ref.pid' must be a positive integer`);
+  }
+  if (appRef.window_id !== undefined && (!Number.isInteger(appRef.window_id) || appRef.window_id <= 0)) {
+    throw new InvalidArgumentError(`${toolName}: 'app_ref.window_id' must be a positive integer`);
+  }
+  if (appRef.name !== undefined && typeof appRef.name !== "string") {
+    throw new InvalidArgumentError(`${toolDefName(toolName)}: 'app_ref.name' must be a string`);
+  }
+  if (appRef.bundle_id !== undefined && typeof appRef.bundle_id !== "string") {
+    throw new InvalidArgumentError(`${toolDefName(toolName)}: 'app_ref.bundle_id' must be a string`);
+  }
+}
+
+function toolDefName(n: string): string {
+  return n;
+}
+
 function validateToolArgs(toolDef: ToolDefinition, args: Record<string, any>): void {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     throw new InvalidArgumentError(`${toolDef.name}: arguments must be a JSON object`);
@@ -134,10 +176,36 @@ function validateToolArgs(toolDef: ToolDefinition, args: Record<string, any>): v
       if (!Array.isArray(val)) {
         throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be an array`);
       }
+      const itemSchema = prop.items as Record<string, any> | undefined;
+      if (itemSchema && typeof itemSchema === "object") {
+        for (const item of val) {
+          if (itemSchema.type === "string" && (typeof item !== "string" || item.length === 0)) {
+            throw new InvalidArgumentError(`${toolDef.name}: every item in '${key}' must be a non-empty string`);
+          }
+          if (Array.isArray(itemSchema.enum) && !itemSchema.enum.includes(item)) {
+            throw new InvalidArgumentError(
+              `${toolDef.name}: every item in '${key}' must be one of [${itemSchema.enum.join(", ")}]`
+            );
+          }
+        }
+      }
     } else if (prop.type === "object") {
       if (typeof val !== "object" || val === null || Array.isArray(val)) {
         throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be an object`);
       }
+    }
+  }
+
+  if (args.modifiers !== undefined) {
+    if (Array.isArray(args.modifiers)) {
+      validateModifierTokens(args.modifiers, toolDef.name);
+    } else if (typeof args.modifiers === "string") {
+      if (args.modifiers.trim().length > 0) {
+        const parts = args.modifiers.split("+");
+        validateModifierTokens(parts, toolDef.name);
+      }
+    } else {
+      throw new InvalidArgumentError(`${toolDef.name}: 'modifiers' must be an array of strings or chord string`);
     }
   }
 
@@ -153,8 +221,8 @@ function validateToolArgs(toolDef: ToolDefinition, args: Record<string, any>): v
   if (args.pid !== undefined && (!Number.isInteger(args.pid) || args.pid <= 0)) {
     throw new InvalidArgumentError(`${toolDef.name}: 'pid' must be a positive integer`);
   }
-  if (args.app_ref?.pid !== undefined && (!Number.isInteger(args.app_ref.pid) || args.app_ref.pid <= 0)) {
-    throw new InvalidArgumentError(`${toolDef.name}: 'app_ref.pid' must be a positive integer`);
+  if (args.app_ref !== undefined) {
+    validateAppRefObject(args.app_ref, toolDef.name);
   }
   if (args.target !== undefined) {
     validateTargetObject(args.target, toolDef.name);
@@ -235,6 +303,16 @@ export class MCPServer {
       if (oldest === undefined) break;
       this.stateIdToAppRef.delete(oldest);
     }
+  }
+
+  private resolveRefForStateId(stateId: string | undefined, explicitRef?: any): any {
+    if (stateId) {
+      const mapped = this.stateIdToAppRef.get(stateId);
+      if (mapped) return mapped;
+      const adapterRef = (this.adapter as any).activeStates?.get?.(stateId)?.appRef;
+      if (adapterRef) return adapterRef;
+    }
+    return explicitRef;
   }
 
   private async attachPostActionState(
@@ -415,21 +493,45 @@ export class MCPServer {
           strategy: args.strategy,
           modifiers: parsedMods,
         });
-        const ref = (args.target?.state_id ? this.stateIdToAppRef.get(args.target.state_id) : undefined) || args.app_ref;
+        const ref = this.resolveRefForStateId(args.target?.state_id, args.app_ref);
         return await this.attachPostActionState(clickReceipt, args.return_state, ref);
       }
 
-      case "double_click":
-        return await this.adapter.doubleClick(args.target, args);
+      case "double_click": {
+        const receipt = await this.adapter.doubleClick(args.target, args);
+        return await this.attachPostActionState(
+          receipt,
+          args.return_state,
+          this.resolveRefForStateId(args.target?.state_id, args.app_ref)
+        );
+      }
 
-      case "triple_click":
-        return await this.adapter.click(args.target, { ...args, clickCount: 3 });
+      case "triple_click": {
+        const receipt = await this.adapter.click(args.target, { ...args, clickCount: 3 });
+        return await this.attachPostActionState(
+          receipt,
+          args.return_state,
+          this.resolveRefForStateId(args.target?.state_id, args.app_ref)
+        );
+      }
 
-      case "right_click":
-        return await this.adapter.rightClick(args.target, args);
+      case "right_click": {
+        const receipt = await this.adapter.rightClick(args.target, args);
+        return await this.attachPostActionState(
+          receipt,
+          args.return_state,
+          this.resolveRefForStateId(args.target?.state_id, args.app_ref)
+        );
+      }
 
-      case "middle_click":
-        return await this.adapter.click(args.target, { ...args, button: "middle" });
+      case "middle_click": {
+        const receipt = await this.adapter.click(args.target, { ...args, button: "middle" });
+        return await this.attachPostActionState(
+          receipt,
+          args.return_state,
+          this.resolveRefForStateId(args.target?.state_id, args.app_ref)
+        );
+      }
 
       case "move_pointer":
       case "mouse_move":
@@ -466,7 +568,7 @@ export class MCPServer {
           { strategy: args.strategy, clearFirst: args.clearFirst, appRef: args.app_ref },
           args.target
         );
-        const ref = args.app_ref || (args.target?.state_id ? this.stateIdToAppRef.get(args.target.state_id) : undefined);
+        const ref = args.app_ref || this.resolveRefForStateId(args.target?.state_id, undefined);
         return await this.attachPostActionState(typeReceipt, args.return_state, ref);
       }
 
@@ -500,7 +602,7 @@ export class MCPServer {
 
       case "set_value": {
         const valReceipt = await this.adapter.setValue(args.target, args.value);
-        const ref = (args.target?.state_id ? this.stateIdToAppRef.get(args.target.state_id) : undefined) || args.app_ref;
+        const ref = this.resolveRefForStateId(args.target?.state_id, args.app_ref);
         return await this.attachPostActionState(valReceipt, args.return_state, ref);
       }
 
@@ -673,20 +775,22 @@ export class MCPServer {
             ? requestedProto
             : "2024-11-05";
 
-          sendResponse({
-            jsonrpc: "2.0",
-            id,
-            result: {
-              protocolVersion: negotiatedVersion,
-              capabilities: {
-                tools: { listChanged: false },
+          if (id !== undefined) {
+            sendResponse({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: negotiatedVersion,
+                capabilities: {
+                  tools: { listChanged: false },
+                },
+                serverInfo: {
+                  name: "macos-computer-use-kit",
+                  version: SERVER_VERSION,
+                },
               },
-              serverInfo: {
-                name: "macos-computer-use-kit",
-                version: SERVER_VERSION,
-              },
-            },
-          });
+            });
+          }
           return;
         }
 
@@ -731,7 +835,9 @@ export class MCPServer {
           });
         }
       } catch (err: any) {
-        process.stderr.write(`[mcp-server] Error processing JSON-RPC: ${err.message}\n`);
+        try {
+          process.stderr.write(`[mcp-server] Error processing JSON-RPC: ${err?.message || String(err)}\n`);
+        } catch {}
       }
     };
 
@@ -783,7 +889,7 @@ export class MCPServer {
 
         const fullLine = buffer + segment;
         buffer = "";
-        requestQueue = requestQueue.then(() => processLine(fullLine));
+        requestQueue = requestQueue.then(() => processLine(fullLine)).catch(() => {});
       }
     });
 
@@ -791,7 +897,7 @@ export class MCPServer {
       if (!discardingOversizedLine && buffer.trim()) {
         const finalLine = buffer;
         buffer = "";
-        requestQueue = requestQueue.then(() => processLine(finalLine));
+        requestQueue = requestQueue.then(() => processLine(finalLine)).catch(() => {});
       }
       void requestQueue.finally(() => cleanExit(0));
     });

@@ -16,11 +16,11 @@
 | Tool | macOS Status | Description | Key Parameters |
 | :--- | :---: | :--- | :--- |
 | `list_apps` | **Stable** | Lists running regular GUI desktop applications. | `{}` |
-| `list_windows` | **Stable** | Lists on-screen Quartz windows across desktop or filtered by app. | `app_ref?: { pid, name, bundle_id }` |
+| `list_windows` | **Stable** | Lists on-screen Quartz windows (`optionOnScreenOnly`, `is_minimized: false`) across desktop or filtered by app. | `app_ref?: { pid, name, bundle_id }` |
 | `get_active_window` | **Stable** | Returns current frontmost on-screen window info. | `{}` |
-| `get_app_state` | **Stable** | Accessibility tree snapshot with stable handles (`h_*`) and secret redaction. | `app_ref`, `detail?: "compact"\|"diff"\|"full"`, `include_screenshot?: bool` |
-| `screenshot` | **Stable** | Captures desktop, display (`display_id`), or window (`window_id`) PNG; returns physical pixel `width`/`height` plus `scale_factor` and logical `point_width`/`point_height`. | `window_id?: number`, `display_id?: number` |
-| `get_screen_info` | **Stable** | Returns display count, main display point/pixel dimensions, scale factor, and per-display Quartz bounds. | `{}` |
+| `get_app_state` | **Stable** | Accessibility tree snapshot with stable handles (`h_*`) and secret redaction (sets `AXEnhancedUserInterface`/`AXManualAccessibility` so Electron/Chromium/Qt expose AX subtrees). | `app_ref`, `detail?: "compact"\|"diff"\|"full"`, `include_screenshot?: bool` |
+| `screenshot` | **Stable** | Captures desktop, 1-based display (`display_id`, matching `displays_detail[].display_index`), or window (`window_id`) PNG; returns physical pixel `width`/`height` plus `scale_factor` and logical `point_width`/`point_height`. | `window_id?: number`, `display_id?: number` |
+| `get_screen_info` | **Stable** | Returns display count, main display point/pixel dimensions, scale factor, and per-display `display_index` + `CGDirectDisplayID` + Quartz `bounds`. | `{}` |
 | `list_displays` | **Stable** | Alias for `get_screen_info`. | `{}` |
 
 ---
@@ -44,7 +44,7 @@
 | `mouse_up` | **Stable** | Releases a held mouse button at current cursor. | `button?: "left"\|"right"\|"middle"` |
 | `left_mouse_up` | **Stable** | Alias for `mouse_up` (`button="left"`). | `{}` |
 
-> **Retina Coordinate Note**: `screenshot` `width`/`height` are physical PNG pixels, whereas `click`, `move_pointer`, and `left_click_drag` use Quartz global **points**. Divide pixel coordinates by `scale_factor` (`px / scale_factor`).
+> **Retina Coordinate Note**: `screenshot` `width`/`height` are physical PNG pixels, whereas `click`, `move_pointer`, and `left_click_drag` use Quartz global **points**. Divide pixel coordinates by `scale_factor` (`Math.round(px / scale_factor)`), and add the window's `bounds.x` / `bounds.y` offset when the screenshot was captured with `window_id`. Note also that `type_text` uses layout-independent Unicode events, whereas `press_key` / `hotkey` map named shortcuts via standard macOS ANSI virtual keycodes.
 
 ---
 

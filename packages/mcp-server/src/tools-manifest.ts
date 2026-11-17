@@ -115,6 +115,8 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
           type: "object",
           description: "Target element ({type: 'element', state_id, index or handle}) or coordinate ({type: 'coordinate', x, y})",
         },
+        app_ref: { type: "object" },
+        modifiers: { description: "Optional modifier chord string (e.g. 'cmd+shift') or array of modifier names" },
         button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
         clickCount: { type: "number", minimum: 1, maximum: 10, default: 1 },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
@@ -150,6 +152,9 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       type: "object",
       properties: {
         target: { type: "object" },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["target"],
     },
@@ -161,6 +166,9 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       type: "object",
       properties: {
         target: { type: "object" },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["target"],
     },
@@ -172,6 +180,9 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       type: "object",
       properties: {
         target: { type: "object" },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["target"],
     },
@@ -183,6 +194,9 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       type: "object",
       properties: {
         target: { type: "object" },
+        app_ref: { type: "object" },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["target"],
     },

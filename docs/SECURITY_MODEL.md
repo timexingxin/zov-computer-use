@@ -51,7 +51,7 @@ flowchart TD
 
 ### 1. Local-Only Stdio Transport (No Network Listener)
 - `@zcode-community/mcp-server` communicates strictly over local `stdin`/`stdout` with zero TCP/HTTP/WebSocket listeners and no built-in remote authentication layer. Never expose its `stdio` pipes directly over an unauthenticated network socket.
--(Note: per-session token files apply only to the optional legacy ZCode Unix-domain socket bridge in `bridges/`.)
+- (Note: per-session token files apply only to the optional legacy ZCode Unix-domain socket bridge in `bridges/`.)
 
 ### 2. Zero Keychain or Browser Storage Harvesting
 - The codebase contains zero routines that read macOS Keychain databases, browser cookie SQLite stores, or saved credential files.

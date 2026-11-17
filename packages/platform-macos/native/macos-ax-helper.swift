@@ -502,7 +502,8 @@ let KEY_CODES: [String: CGKeyCode] = [
 func modifierFlags(from mods: [String]) -> CGEventFlags {
     var flags = CGEventFlags()
     for m in mods {
-        switch m.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+        let norm = m.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        switch norm {
         case "cmd", "command", "meta", "super":
             flags.insert(.maskCommand)
         case "ctrl", "control":
@@ -512,10 +513,17 @@ func modifierFlags(from mods: [String]) -> CGEventFlags {
         case "shift":
             flags.insert(.maskShift)
         default:
-            break
+            failJSON("Invalid or unrecognized modifier key: '\(m)'", code: "invalid_argument")
         }
     }
     return flags
+}
+
+let initialParentPid: pid_t = getppid()
+func exitIfParentDied() {
+    if initialParentPid > 1 && getppid() != initialParentPid {
+        exit(1)
+    }
 }
 
 func parseCoord(_ raw: String?, name: String) -> Double {
@@ -609,6 +617,19 @@ case "act-element":
         if actualName != expName {
             failJSON("Element label changed at AX path (expected '\(expName)', got '\(actualName)'); re-observe state", code: "stale_handle")
         }
+    } else if let expBoundsRaw = argVal("--expected-bounds") {
+        let nums = expBoundsRaw.split(separator: ",").compactMap { Double($0) }
+        if nums.count == 4, let actualB = boundsAttr(el) {
+            let expCx = nums[0] + nums[2] / 2.0
+            let expCy = nums[1] + nums[3] / 2.0
+            let actCx = Double(actualB.x) + Double(actualB.width) / 2.0
+            let actCy = Double(actualB.y) + Double(actualB.height) / 2.0
+            let tolX = max(40.0, nums[2] / 2.0)
+            let tolY = max(40.0, nums[3] / 2.0)
+            if abs(actCx - expCx) > tolX || abs(actCy - expCy) > tolY {
+                failJSON("Anonymous element bounds drifted at AX path; re-observe state", code: "stale_handle")
+            }
+        }
     }
 
     if action == "setValue" {
@@ -690,6 +711,7 @@ case "click-coord":
 
     let flags = modifierFlags(from: mods)
     for clickIdx in 1...count {
+        exitIfParentDied()
         if let down = CGEvent(mouseEventSource: src, mouseType: downType, mouseCursorPosition: pt, mouseButton: cgBtn),
            let up = CGEvent(mouseEventSource: src, mouseType: upType, mouseCursorPosition: pt, mouseButton: cgBtn) {
             if !flags.isEmpty {
@@ -771,6 +793,7 @@ case "key":
         repeatCount = 1
     }
 
+    let flags = modifierFlags(from: mods)
     let normalizedMods = mods.map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
     if argVal("--dry-run") == "1" {
         emitDict([
@@ -784,11 +807,11 @@ case "key":
     }
 
     let targetPid = argVal("--pid").flatMap { Int32($0) }
-    let flags = modifierFlags(from: mods)
     let src = CGEventSource(stateID: .privateState)
 
     if let keyCode = KEY_CODES[lower] {
         for _ in 0..<repeatCount {
+            exitIfParentDied()
             guard let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true),
                   let up = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
             else {
@@ -812,6 +835,7 @@ case "key":
     } else {
         let utf16 = Array(mainKey.utf16)
         for _ in 0..<repeatCount {
+            exitIfParentDied()
             guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
             else {
@@ -845,6 +869,7 @@ case "type-unicode":
     let targetPid = argVal("--pid").flatMap { Int32($0) }
     let src = CGEventSource(stateID: .privateState)
     for scalar in text {
+        exitIfParentDied()
         let s = String(scalar)
         if s == "\n" {
             if let down = CGEvent(keyboardEventSource: src, virtualKey: 36, keyDown: true),
@@ -887,7 +912,7 @@ case "screen-info":
     let scale = Double(matchingScreen?.backingScaleFactor ?? 2.0)
     let primaryHeight: CGFloat = NSScreen.screens.first?.frame.height ?? CGFloat(h)
 
-    let displaysDetail: [[String: Any]] = NSScreen.screens.map { scr in
+    let displaysDetail: [[String: Any]] = NSScreen.screens.enumerated().map { (idx, scr) in
         let did = (scr.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
         let f = scr.frame
         // Convert AppKit bottom-left origin to Quartz global top-left point space
@@ -895,6 +920,7 @@ case "screen-info":
         let s = Double(scr.backingScaleFactor)
         return [
             "id": Int(did),
+            "display_index": idx + 1,
             "is_main": did == mainDisp,
             "bounds": [
                 "x": Int(f.origin.x.rounded()),
@@ -998,17 +1024,32 @@ case "window-op":
     case "maximize":
         if boolAttr(winEl, "AXFullScreen", default: false) {
             success = true
-        } else if let curBounds = boundsAttr(winEl),
-                  let vis = NSScreen.main?.visibleFrame,
-                  abs(Double(curBounds.width) - Double(vis.width)) <= 4 && abs(Double(curBounds.height) - Double(vis.height)) <= 4 {
-            // Already zoomed to visible screen frame; keep idempotent instead of toggling back down
-            success = true
         } else {
-            var btnRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(winEl, kAXZoomButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
-                success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
-            } else if AXUIElementCopyAttributeValue(winEl, kAXFullScreenButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
-                success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
+            var alreadyZoomed = false
+            if let curBounds = boundsAttr(winEl) {
+                let primaryH = NSScreen.screens.first?.frame.height ?? 1080
+                let cx = CGFloat(curBounds.x) + CGFloat(curBounds.width) / 2.0
+                let cy = CGFloat(curBounds.y) + CGFloat(curBounds.height) / 2.0
+                let hostScreen = NSScreen.screens.first { scr in
+                    let f = scr.frame
+                    let qY = primaryH - (f.origin.y + f.size.height)
+                    return cx >= f.origin.x && cx <= f.origin.x + f.size.width && cy >= qY && cy <= qY + f.size.height
+                } ?? NSScreen.main
+                if let vis = hostScreen?.visibleFrame,
+                   abs(Double(curBounds.width) - Double(vis.width)) <= 4 &&
+                   abs(Double(curBounds.height) - Double(vis.height)) <= 4 {
+                    alreadyZoomed = true
+                }
+            }
+            if alreadyZoomed {
+                success = true
+            } else {
+                var btnRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(winEl, kAXZoomButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
+                    success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
+                } else if AXUIElementCopyAttributeValue(winEl, kAXFullScreenButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
+                    success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
+                }
             }
         }
     default:

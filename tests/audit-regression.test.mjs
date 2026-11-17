@@ -88,6 +88,49 @@ test("C1 + R13 + B1: Password redaction holds across full/compact/diff and all r
     assert.ok(!compactRes.content[0].text.includes(secret), `get_app_state(compact) leaked ${secret}`);
   }
 
+  // N-15: Verify detail="diff" also redacts modified password values
+  let pwdVersion = 1;
+  mockAdapter.getAppState = async () => ({
+    state_id: `s_login_diff_${pwdVersion}`,
+    app: { pid: 500, name: "AuthApp", active: true },
+    tree: [
+      {
+        index: 0,
+        handle: "h_sec",
+        role: "textfield",
+        subrole: "securetextfield",
+        name: "System Password",
+        value: pwdVersion++ === 1 ? "UpdatedSecretAlpha!" : "NativeSecret999!",
+        capabilities: ["editable"],
+        actions: [],
+      },
+      {
+        index: 1,
+        handle: "h_web_pwd",
+        role: "textfield",
+        name: "Account Password",
+        value: "WebDomSecret888!",
+        capabilities: ["editable"],
+        actions: [],
+      },
+      {
+        index: 2,
+        handle: "h_cn_pwd",
+        role: "textfield",
+        description: "请输入登录密码",
+        name: "",
+        value: "CnSecret777!",
+        capabilities: ["editable"],
+        actions: [],
+      },
+    ],
+    element_count: 3,
+    timestamp: Date.now(),
+  });
+  const diffRes = await server.handleCallTool("get_app_state", { app_ref: { pid: 500 }, detail: "diff" });
+  assert.ok(!diffRes.content[0].text.includes("UpdatedSecretAlpha!"), "detail=diff leaked updated password");
+  assert.ok(!diffRes.content[0].text.includes("NativeSecret999!"), "detail=diff leaked original password");
+
   for (const [tool, callArgs] of [
     ["left_click", { target: { type: "element", state_id: "s_login_1", index: 0 }, return_state: "full" }],
     ["type", { text: "x", app_ref: { pid: 500 }, return_state: "full" }],
@@ -285,6 +328,13 @@ test("R7 + R11 + R15 + R18: role filter on click/set_element_value, secondary TO
   assert.equal(r7Set.isError, true);
   assert.equal(JSON.parse(r7Set.content[0].text).code, "element_not_found");
 
+  const r7Find = await server.handleCallTool("find_element", {
+    app_ref: { pid: 100 },
+    name: "Save",
+    role: "button",
+  });
+  assert.equal(JSON.parse(r7Find.content[0].text).not_found, true);
+
   // R15: non-existent PID 999999 must return app_not_found
   const r15 = await server.handleCallTool("open_application", { pid: 999999 });
   assert.equal(r15.isError, true);
@@ -457,6 +507,27 @@ test("R12 + B8 + B13: computeStateDiff handles duplicate weak handles accurately
   });
   const noBaseline = await server.handleCallTool("get_app_state", { app_ref: { pid: 777 }, detail: "diff" });
   assert.equal(JSON.parse(noBaseline.content[0].text).diff_baseline_missing, true);
+
+  // N-15 + B13: Push 70 states into MacOSAdapter (> 64 limit) and verify oldest state is evicted cleanly
+  const evictAdapter = new MacOSAdapter();
+  let seq = 0;
+  evictAdapter.runHelper = async (args) => {
+    if (args[0] === "list-apps") return [{ pid: 900, name: "EvictApp", active: true }];
+    return {
+      app: { pid: 900, name: "EvictApp", active: true },
+      elements: [{ role: "button", name: `Btn${seq++}`, capabilities: ["pressable"], actions: ["AXPress"], ax_path: [0], enabled: true, focused: false }],
+    };
+  };
+  const stateIds = [];
+  for (let i = 0; i < 70; i++) {
+    const st = await evictAdapter.getAppState({ pid: 900 });
+    stateIds.push(st.state_id);
+  }
+  assert.equal(evictAdapter.activeStates.size, 64, "activeStates must stay bounded at 64");
+  await assert.rejects(
+    () => evictAdapter.click({ type: "element", state_id: stateIds[0], index: 0 }),
+    (err) => err.code === "stale_handle"
+  );
 });
 
 test("B3 + O11 + O12: Stdio JSON-RPC serializes FIFO, whitelists protocolVersion, rejects >2 MiB lines, and exits cleanly", async () => {
@@ -490,10 +561,14 @@ test("B3 + O11 + O12: Stdio JSON-RPC serializes FIFO, whitelists protocolVersion
   const exitCode = await new Promise((resolve) => proc.on("close", resolve));
   assert.equal(exitCode, 0);
 
-  // Response 0: initialize falls back to 2024-11-05 (not 2026-07-28) and reports version 0.2.0
+  const expectedMcpVersion = JSON.parse(
+    readFileSync(join(repoRoot, "packages", "mcp-server", "package.json"), "utf-8")
+  ).version;
+
+  // Response 0: initialize falls back to 2024-11-05 (not 2026-07-28) and reports dynamic package version
   assert.equal(lines[0].id, 1);
   assert.equal(lines[0].result.protocolVersion, "2024-11-05");
-  assert.equal(lines[0].result.serverInfo.version, "0.2.0");
+  assert.equal(lines[0].result.serverInfo.version, expectedMcpVersion);
 
   // Response 1: oversized line rejected with -32600 without crashing stream
   assert.equal(lines[1].error.code, -32600);
@@ -557,5 +632,112 @@ test(
     const hugeScroll = run(["pointer-op", "--op", "scroll", "--delta-y", "3000000000"]);
     assert.equal(hugeScroll.status, 1);
     assert.equal(JSON.parse(hugeScroll.stdout).code, "invalid_argument");
+
+    // N-3: Unknown modifier names in chord ("ctl+a", "a+b") must fail closed instead of silently dropping modifiers
+    for (const badModChord of ["ctl+a", "a+b", "superkey+c"]) {
+      const badModRes = run(["key", "--key", badModChord, "--dry-run", "1"]);
+      assert.equal(badModRes.status, 1, `Chord '${badModChord}' must exit 1`);
+      assert.equal(JSON.parse(badModRes.stdout).code, "invalid_argument");
+    }
   }
 );
+
+test("N-1 + N-2 + N-3 + N-8 + N-13: Round-2 array item validation, AXPress post-send no-fallback guard, modifier whitelist, and anonymous bounds TOCTOU", async () => {
+  // N-1 + N-13: Safe mock adapter ensures zero real OS side effects even before fix
+  const trapAdapter = {
+    platform: "darwin",
+    async hotkey() {
+      throw new Error("UNSAFE_REACHED_HOTKEY");
+    },
+    async pressKey() {
+      throw new Error("UNSAFE_REACHED_PRESSKEY");
+    },
+    async getAppState() {
+      throw new Error("UNSAFE_REACHED_GETAPPSTATE");
+    },
+    async requestAccess() {
+      throw new Error("UNSAFE_REACHED_REQUESTACCESS");
+    },
+  };
+  const server = new MCPServer(trapAdapter);
+
+  for (const [tool, badArgs] of [
+    ["hotkey", { keys: [123] }],
+    ["hotkey", { keys: [""] }],
+    ["press_key", { key: "a", modifiers: [123] }],
+    ["press_key", { key: "a", modifiers: ["ctl"] }],
+    ["press_key", { key: "a", modifiers: ["cmd+shift"] }],
+    ["request_access", { types: ["camera"] }],
+    ["get_app_state", { app_ref: { name: 123 } }],
+    ["get_app_state", { app_ref: { pid: 100, window_id: -5 } }],
+  ]) {
+    const res = await server.handleCallTool(tool, badArgs);
+    assert.equal(res.isError, true, `${tool} ${JSON.stringify(badArgs)} must fail closed`);
+    assert.equal(JSON.parse(res.content[0].text).code, "invalid_argument", `${tool} must return invalid_argument`);
+  }
+
+  // Direct MacOSAdapter string & modifier guards
+  const mac = new MacOSAdapter();
+  mac.runHelper = async () => {
+    throw new Error("Should not spawn helper on invalid key/modifier");
+  };
+  await assert.rejects(() => mac.hotkey([123]), (err) => err.code === "invalid_argument");
+  await assert.rejects(() => mac.pressKey("a", ["ctl"]), (err) => err.code === "invalid_argument");
+  await assert.rejects(() => mac.pressKey("a", ["cmd+shift"]), (err) => err.code === "invalid_argument");
+
+  // N-2: If act-element fails AFTER sending action (actionSent=true), click MUST NOT fall through to click-coord
+  const n2Calls = [];
+  const { ComputerUseError } = await import("../packages/core/dist/index.js");
+  mac.runHelper = async (args) => {
+    n2Calls.push(args[0]);
+    if (args[0] === "act-element") {
+      throw new ComputerUseError("helper crashed after AXPress", "operation_failed", false, true);
+    }
+    return { ok: true };
+  };
+  mac.activeStates.set("s_n2", {
+    appRef: { pid: 222, name: "TestApp" },
+    tree: assignHandlesToTree(222, [
+      {
+        index: 0,
+        handle: "",
+        role: "button",
+        name: "Submit",
+        bounds: { x: 50, y: 50, width: 80, height: 30 },
+        capabilities: ["pressable"],
+        actions: ["AXPress"],
+        ax_path: [0, 1],
+      },
+    ]),
+  });
+  await assert.rejects(
+    () => mac.click({ type: "element", state_id: "s_n2", index: 0 }, { strategy: "auto" }),
+    (err) => err.actionSent === true
+  );
+  assert.deepEqual(n2Calls, ["act-element"], "N-2: Must NEVER fall back to click-coord when actionSent=true");
+
+  // N-8: Anonymous element (empty name, no identifier) passes --expected-bounds to act-element
+  const n8Calls = [];
+  mac.runHelper = async (args) => {
+    n8Calls.push(args);
+    return { ok: true, ax_error: 0 };
+  };
+  mac.activeStates.set("s_n8", {
+    appRef: { pid: 222, name: "TestApp" },
+    tree: assignHandlesToTree(222, [
+      {
+        index: 0,
+        handle: "",
+        role: "button",
+        name: "",
+        bounds: { x: 120, y: 240, width: 44, height: 28 },
+        capabilities: ["pressable"],
+        actions: ["AXPress"],
+        ax_path: [0, 2],
+      },
+    ]),
+  });
+  await mac.click({ type: "element", state_id: "s_n8", index: 0 });
+  assert.ok(n8Calls[0].includes("--expected-bounds"), "N-8: Anonymous element must pass --expected-bounds");
+  assert.ok(n8Calls[0].includes("120,240,44,28"));
+});

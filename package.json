@@ -1,6 +1,6 @@
 {
   "name": "macos-computer-use-kit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Turnkey macOS Computer Use Skills + Open-Source Accessibility MCP Server + Optional ZCode Native Bridge for AI Agents.",
   "type": "module",

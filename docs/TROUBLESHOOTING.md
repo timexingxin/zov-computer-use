@@ -53,4 +53,4 @@ Action fails with `code: "stale_handle"` and `action_sent: false` (because `stat
 
 ## 5. Retina Coordinate Offset on Visual Fallback
 
-`screenshot` returns physical PNG pixel dimensions (`width`, `height`) plus `scale_factor` (typically `2` on Retina Macs), while `click` / `move_pointer` expect Quartz global **point** coordinates. Divide pixel positions read from a screenshot by `scale_factor` (`Math.round(px / scale_factor)`).
+`screenshot` returns physical PNG pixel dimensions (`width`, `height`) plus `scale_factor` (typically `2` on Retina Macs), while `click` / `move_pointer` expect Quartz global **point** coordinates. Divide pixel positions read from a screenshot by `scale_factor` (`Math.round(px / scale_factor)`), and add the window's `bounds.x` / `bounds.y` offset if the screenshot was window-scoped (`window_id`). For multi-monitor setups, pass `display_id` using the 1-based `displays_detail[].display_index` from `get_screen_info` (rather than the raw `CGDirectDisplayID`).

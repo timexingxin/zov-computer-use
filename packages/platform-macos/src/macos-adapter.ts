@@ -42,6 +42,35 @@ const EDITABLE_ROLES = new Set([
   "searchfield",
   "securetextfield",
 ]);
+const VALID_MODIFIERS = new Set([
+  "cmd",
+  "command",
+  "meta",
+  "super",
+  "ctrl",
+  "control",
+  "alt",
+  "option",
+  "opt",
+  "shift",
+]);
+
+function assertValidModifiers(modifiers: unknown[], context: string): string[] {
+  const out: string[] = [];
+  for (const mod of modifiers) {
+    if (typeof mod !== "string") {
+      throw new InvalidArgumentError(`${context}: modifier must be a string`);
+    }
+    const norm = mod.trim().toLowerCase();
+    if (!VALID_MODIFIERS.has(norm)) {
+      throw new InvalidArgumentError(
+        `${context}: unrecognized modifier '${mod}' (expected cmd/ctrl/alt/option/shift)`
+      );
+    }
+    out.push(norm);
+  }
+  return out;
+}
 
 function resolveNativeHelperPath(): string {
   const distDir = dirname(fileURLToPath(import.meta.url));
@@ -154,8 +183,19 @@ export class MacOSAdapter implements PlatformAdapter {
 
       child.on("close", (code, signal) => {
         finish(() => {
-          if (timedOut || signal === "SIGTERM" || signal === "SIGKILL") {
+          if (timedOut) {
             reject(new TimeoutError(actionLabel, timeoutMs, isMutating));
+            return;
+          }
+          if (signal) {
+            reject(
+              new ComputerUseError(
+                `macOS AX helper terminated by signal ${signal} (${actionLabel})`,
+                "operation_cancelled",
+                true,
+                isMutating
+              )
+            );
             return;
           }
 
@@ -240,9 +280,11 @@ export class MacOSAdapter implements PlatformAdapter {
 
     const buttons = [...this.heldMouseButtons];
     this.heldMouseButtons.clear();
-    for (const btn of buttons) {
-      await this.runHelper(["pointer-op", "--op", "up", "--button", btn], 2000, true).catch(() => {});
-    }
+    await Promise.all(
+      buttons.map((btn) =>
+        this.runHelper(["pointer-op", "--op", "up", "--button", btn], 600, true).catch(() => {})
+      )
+    );
   }
 
   private rememberState(stateId: string, record: { appRef: AppRef; tree: UIElement[] }): void {
@@ -442,10 +484,34 @@ export class MacOSAdapter implements PlatformAdapter {
       }
 
       const screenInfo = await this.getScreenInfo().catch(() => null);
-      const scaleFactor =
+      let scaleFactor =
         screenInfo?.main_display?.scale && screenInfo.main_display.scale > 0
           ? screenInfo.main_display.scale
           : 2;
+
+      if (options.display_id !== undefined && Array.isArray(screenInfo?.displays_detail)) {
+        const byDisp = screenInfo.displays_detail[options.display_id - 1];
+        if (byDisp?.scale && byDisp.scale > 0) {
+          scaleFactor = byDisp.scale;
+        }
+      } else if (options.window_id !== undefined && Array.isArray(screenInfo?.displays_detail)) {
+        const winList = await this.listWindows().catch(() => []);
+        const win = winList.find((w) => w.id === options.window_id);
+        if (win?.bounds) {
+          const cx = win.bounds.x + win.bounds.width / 2;
+          const cy = win.bounds.y + win.bounds.height / 2;
+          const matchDisp = screenInfo.displays_detail.find(
+            (d) =>
+              cx >= d.bounds.x &&
+              cx <= d.bounds.x + d.bounds.width &&
+              cy >= d.bounds.y &&
+              cy <= d.bounds.y + d.bounds.height
+          );
+          if (matchDisp?.scale && matchDisp.scale > 0) {
+            scaleFactor = matchDisp.scale;
+          }
+        }
+      }
 
       return {
         base64: buffer.toString("base64"),
@@ -642,6 +708,12 @@ export class MacOSAdapter implements PlatformAdapter {
           ];
           if (elem.identifier) axArgs.push("--expected-identifier", elem.identifier);
           if (elem.name) axArgs.push("--expected-name", elem.name);
+          if (!elem.identifier && !elem.name && elem.bounds) {
+            axArgs.push(
+              "--expected-bounds",
+              `${elem.bounds.x},${elem.bounds.y},${elem.bounds.width},${elem.bounds.height}`
+            );
+          }
 
           await this.runHelper(axArgs, 8000, true);
           return {
@@ -652,7 +724,11 @@ export class MacOSAdapter implements PlatformAdapter {
             target,
           };
         } catch (axErr: any) {
-          if (axErr instanceof StaleHandleError || axErr instanceof TimeoutError) {
+          if (
+            axErr instanceof StaleHandleError ||
+            axErr instanceof TimeoutError ||
+            (axErr instanceof ComputerUseError && axErr.actionSent)
+          ) {
             throw axErr;
           }
           if (strategy === "a11y") {
@@ -924,6 +1000,14 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async pressKey(key: string, modifiers: string[] = [], options?: KeyOptions): Promise<ActionResult> {
+    if (typeof key !== "string" || key.length === 0) {
+      throw new InvalidArgumentError("key must be a non-empty string");
+    }
+    if (!Array.isArray(modifiers)) {
+      throw new InvalidArgumentError("modifiers must be an array of modifier strings");
+    }
+    const cleanModifiers = assertValidModifiers(modifiers, "pressKey");
+
     if (options?.strategy === "a11y") {
       throw new ComputerUseError(
         `key/press_key does not support strategy="a11y"; use perform_action or strategy="auto"/"event"`,
@@ -948,8 +1032,8 @@ export class MacOSAdapter implements PlatformAdapter {
     }
 
     const helperArgs = ["key", "--key", key];
-    if (modifiers.length > 0) {
-      helperArgs.push("--modifiers", modifiers.join(","));
+    if (cleanModifiers.length > 0) {
+      helperArgs.push("--modifiers", cleanModifiers.join(","));
     }
     if (options?.repeat && options.repeat > 1) {
       helperArgs.push("--repeat", String(options.repeat));
@@ -962,7 +1046,7 @@ export class MacOSAdapter implements PlatformAdapter {
     }
 
     await this.runHelper(helperArgs, 15000, true);
-    const modDesc = modifiers.length ? ` with ${modifiers.join("+")}` : "";
+    const modDesc = cleanModifiers.length ? ` with ${cleanModifiers.join("+")}` : "";
     return {
       ok: true,
       action: "press_key",
@@ -976,6 +1060,11 @@ export class MacOSAdapter implements PlatformAdapter {
   async hotkey(keys: string[], options?: KeyOptions): Promise<ActionResult> {
     if (!Array.isArray(keys) || keys.length === 0) {
       throw new InvalidArgumentError("Hotkey requires at least one key");
+    }
+    for (const k of keys) {
+      if (typeof k !== "string" || k.length === 0) {
+        throw new InvalidArgumentError("Every key in hotkey 'keys' array must be a non-empty string");
+      }
     }
     const mainKey = keys[keys.length - 1];
     const modifiers = keys.slice(0, keys.length - 1);
@@ -1025,6 +1114,12 @@ export class MacOSAdapter implements PlatformAdapter {
     }
     if (elem.name) {
       helperArgs.push("--expected-name", elem.name);
+    }
+    if (!elem.identifier && !elem.name && elem.bounds) {
+      helperArgs.push(
+        "--expected-bounds",
+        `${elem.bounds.x},${elem.bounds.y},${elem.bounds.width},${elem.bounds.height}`
+      );
     }
     if (value !== undefined) {
       helperArgs.push("--value", value);
