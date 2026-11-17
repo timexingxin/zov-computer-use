@@ -52,7 +52,7 @@ for (const skillRel of [
   "skills/zov-computer-use/SKILL.md",
 ]) {
   const text = readFileSync(join(rootDir, skillRel), "utf-8");
-  if (!text.startsWith("---\nname:")) {
+  if (!/^---\r?\nname:/.test(text)) {
     console.error(`[lint:FAIL] Missing YAML frontmatter in ${skillRel}`);
     violations++;
   }

@@ -118,7 +118,7 @@ export async function runDoctor(customAdapter?: PlatformAdapter): Promise<Doctor
   const coreReady =
     runtimeValid &&
     mcpValid &&
-    (["darwin", "win32"].includes(process.platform) ? nativeAxHelperReady : true);
+    (isDarwin || isWin32 ? nativeAxHelperReady : true);
 
   const missingRealGui: string[] = [];
   if (!osSupported) missingRealGui.push("supported_desktop_os");
