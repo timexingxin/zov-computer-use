@@ -58,15 +58,31 @@ for (const pkg of PACKAGES_ORDER) {
 }
 
 if (!isTypecheck) {
-  // Compile native macOS Swift AX helper when building on Darwin with swiftc available
-  if (process.platform === "darwin" && existsSync("/usr/bin/swiftc")) {
+  // Compile native macOS Swift AX helper on Darwin; fail closed if Xcode Command Line Tools are missing
+  if (process.platform === "darwin") {
+    try {
+      execFileSync("/usr/bin/xcode-select", ["-p"], { stdio: "pipe" });
+    } catch {
+      throw new Error(
+        "Xcode Command Line Tools are required on macOS to compile macos-ax-helper. Run 'xcode-select --install' first."
+      );
+    }
+    if (!existsSync("/usr/bin/swiftc")) {
+      throw new Error(
+        "Swift compiler (/usr/bin/swiftc) not found. Install Xcode Command Line Tools via 'xcode-select --install'."
+      );
+    }
     const swiftSrc = join(rootDir, "packages", "platform-macos", "native", "macos-ax-helper.swift");
     const swiftBinDir = join(rootDir, "packages", "platform-macos", "dist", "bin");
     const swiftOut = join(swiftBinDir, "macos-ax-helper");
-    if (existsSync(swiftSrc)) {
-      mkdirSync(swiftBinDir, { recursive: true });
-      execFileSync("/usr/bin/swiftc", ["-O", swiftSrc, "-o", swiftOut], { stdio: "inherit" });
-      chmodSync(swiftOut, 0o755);
+    if (!existsSync(swiftSrc)) {
+      throw new Error(`Native Swift source missing at ${swiftSrc}`);
+    }
+    mkdirSync(swiftBinDir, { recursive: true });
+    execFileSync("/usr/bin/swiftc", ["-O", swiftSrc, "-o", swiftOut], { stdio: "inherit" });
+    chmodSync(swiftOut, 0o755);
+    if (!existsSync(swiftOut)) {
+      throw new Error(`Failed to produce compiled macos-ax-helper binary at ${swiftOut}`);
     }
   }
 

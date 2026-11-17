@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import type { UIElement } from "./types.js";
 
 /**
- * Generates a Strong Handle based on native persistent identifier (AXIdentifier / AutomationId).
- * Immune to DOM/AX tree mutations, sibling reordering, and layout reflows.
+ * Generates a Strong Handle based on native persistent identifier (AXIdentifier / AutomationId)
+ * combined with normalized label (so shared framework identifiers such as Qt6 QWebEngineNode
+ * remain distinct). Stable across sibling reordering and layout reflows; changes if label toggles.
  */
 export function generateStrongHandle(
   windowId: number | string,

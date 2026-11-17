@@ -1,9 +1,12 @@
-import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
 import {
+  type AppState,
   type PlatformAdapter,
   AmbiguousElementError,
+  AppNotFoundError,
   ComputerUseError,
   ElementNotFoundError,
+  InvalidArgumentError,
   UnsupportedPlatformError,
   computeStateDiff,
   getPlatformCapabilities,
@@ -13,7 +16,191 @@ import {
 import { MacOSAdapter } from "@zcode-community/platform-macos";
 import { WindowsAdapter } from "@zcode-community/platform-windows";
 import { LinuxAdapter } from "@zcode-community/platform-linux";
-import { TOOLS_MANIFEST } from "./tools-manifest.js";
+import { TOOLS_MANIFEST, type ToolDefinition } from "./tools-manifest.js";
+
+const MAX_RETAINED_STATES = 64;
+const MAX_STDIO_LINE_BYTES = 2 * 1024 * 1024;
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([
+  "2024-11-05",
+  "2025-03-26",
+  "2025-06-18",
+  "2026-07-28",
+]);
+
+const MANIFEST_BY_NAME = new Map<string, ToolDefinition>(
+  TOOLS_MANIFEST.map((tool) => [tool.name, tool])
+);
+
+const PLATFORM_AGNOSTIC_TOOLS = new Set([
+  "get_capabilities",
+  "stop_computer_control",
+  "wait",
+  "request_access",
+]);
+
+function readServerVersion(): string {
+  try {
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf-8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.version === "string" && parsed.version.trim()) {
+      return parsed.version.trim();
+    }
+  } catch {}
+  return "0.2.0";
+}
+
+const SERVER_VERSION = readServerVersion();
+
+function sanitizeState(rawState: AppState): AppState {
+  return {
+    ...rawState,
+    tree: Array.isArray(rawState.tree) ? rawState.tree.map(redactElementSecrets) : [],
+  };
+}
+
+function validateTargetObject(target: any, toolName: string): void {
+  if (!target || typeof target !== "object" || Array.isArray(target)) {
+    throw new InvalidArgumentError(`${toolName}: 'target' must be an object`);
+  }
+  if (target.type !== "element" && target.type !== "coordinate") {
+    throw new InvalidArgumentError(`${toolName}: target.type must be 'element' or 'coordinate'`);
+  }
+  if (target.type === "coordinate") {
+    if (
+      typeof target.x !== "number" ||
+      typeof target.y !== "number" ||
+      !Number.isFinite(target.x) ||
+      !Number.isFinite(target.y) ||
+      Math.abs(target.x) > 100_000 ||
+      Math.abs(target.y) > 100_000
+    ) {
+      throw new InvalidArgumentError(`${toolName}: coordinate target requires finite x and y within [-100000, 100000]`);
+    }
+  } else {
+    const hasIndex = target.index !== undefined;
+    const hasHandle = typeof target.handle === "string" && target.handle.length > 0;
+    const hasName = typeof target.name === "string" && target.name.length > 0;
+    if (hasIndex && (!Number.isInteger(target.index) || target.index < 0)) {
+      throw new InvalidArgumentError(`${toolName}: element target.index must be a non-negative integer`);
+    }
+    if (!hasIndex && !hasHandle && !hasName) {
+      throw new InvalidArgumentError(`${toolName}: element target requires 'index' or 'handle'`);
+    }
+  }
+}
+
+function validateToolArgs(toolDef: ToolDefinition, args: Record<string, any>): void {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new InvalidArgumentError(`${toolDef.name}: arguments must be a JSON object`);
+  }
+
+  const required = toolDef.inputSchema.required || [];
+  for (const reqKey of required) {
+    if (args[reqKey] === undefined || args[reqKey] === null) {
+      throw new InvalidArgumentError(`${toolDef.name}: missing required argument '${reqKey}'`);
+    }
+  }
+
+  const props = toolDef.inputSchema.properties || {};
+  for (const [key, propRaw] of Object.entries(props)) {
+    const val = args[key];
+    if (val === undefined) continue;
+    const prop = propRaw as Record<string, any>;
+
+    if (prop.type === "number") {
+      if (typeof val !== "number" || !Number.isFinite(val)) {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be a finite number`);
+      }
+      if (typeof prop.minimum === "number" && val < prop.minimum) {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be >= ${prop.minimum}`);
+      }
+      if (typeof prop.maximum === "number" && val > prop.maximum) {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be <= ${prop.maximum}`);
+      }
+    } else if (prop.type === "string") {
+      if (typeof val !== "string") {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be a string`);
+      }
+      if (Array.isArray(prop.enum) && !prop.enum.includes(val)) {
+        throw new InvalidArgumentError(
+          `${toolDef.name}: '${key}' must be one of [${prop.enum.join(", ")}]`
+        );
+      }
+    } else if (prop.type === "boolean") {
+      if (typeof val !== "boolean") {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be a boolean`);
+      }
+    } else if (prop.type === "array") {
+      if (!Array.isArray(val)) {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be an array`);
+      }
+    } else if (prop.type === "object") {
+      if (typeof val !== "object" || val === null || Array.isArray(val)) {
+        throw new InvalidArgumentError(`${toolDef.name}: '${key}' must be an object`);
+      }
+    }
+  }
+
+  if (args.clickCount !== undefined && !Number.isInteger(args.clickCount)) {
+    throw new InvalidArgumentError(`${toolDef.name}: 'clickCount' must be an integer between 1 and 10`);
+  }
+  if (args.repeat !== undefined && !Number.isInteger(args.repeat)) {
+    throw new InvalidArgumentError(`${toolDef.name}: 'repeat' must be an integer between 0 and 100`);
+  }
+  if (args.window_id !== undefined && (!Number.isInteger(args.window_id) || args.window_id <= 0)) {
+    throw new InvalidArgumentError(`${toolDef.name}: 'window_id' must be a positive integer`);
+  }
+  if (args.pid !== undefined && (!Number.isInteger(args.pid) || args.pid <= 0)) {
+    throw new InvalidArgumentError(`${toolDef.name}: 'pid' must be a positive integer`);
+  }
+  if (args.app_ref?.pid !== undefined && (!Number.isInteger(args.app_ref.pid) || args.app_ref.pid <= 0)) {
+    throw new InvalidArgumentError(`${toolDef.name}: 'app_ref.pid' must be a positive integer`);
+  }
+  if (args.target !== undefined) {
+    validateTargetObject(args.target, toolDef.name);
+  }
+
+  if (toolDef.name === "left_click_drag") {
+    const tx = args.toX ?? args.x;
+    const ty = args.toY ?? args.y;
+    if (
+      typeof tx !== "number" ||
+      typeof ty !== "number" ||
+      !Number.isFinite(tx) ||
+      !Number.isFinite(ty) ||
+      Math.abs(tx) > 100_000 ||
+      Math.abs(ty) > 100_000
+    ) {
+      throw new InvalidArgumentError("left_click_drag: requires finite target coordinates (toX/toY or x/y)");
+    }
+    if (args.fromX !== undefined || args.fromY !== undefined) {
+      if (
+        typeof args.fromX !== "number" ||
+        typeof args.fromY !== "number" ||
+        !Number.isFinite(args.fromX) ||
+        !Number.isFinite(args.fromY)
+      ) {
+        throw new InvalidArgumentError("left_click_drag: both fromX and fromY must be finite numbers when provided");
+      }
+    }
+  }
+
+  if (toolDef.name === "press_key" || toolDef.name === "key" || toolDef.name === "hold_key") {
+    const keyInput = args.key ?? args.text;
+    if (typeof keyInput !== "string" || keyInput.length === 0) {
+      throw new InvalidArgumentError(`${toolDef.name}: requires a non-empty 'key' or 'text' string`);
+    }
+  }
+
+  if (toolDef.name === "open_application") {
+    const hasName = typeof args.name === "string" && args.name.trim().length > 0;
+    const hasBundle = typeof args.bundle_id === "string" && args.bundle_id.trim().length > 0;
+    const hasPid = typeof args.pid === "number" && Number.isInteger(args.pid) && args.pid > 0;
+    if (!hasName && !hasBundle && !hasPid) {
+      throw new InvalidArgumentError("open_application requires 'name', 'bundle_id', or positive integer 'pid'");
+    }
+  }
+}
 
 export function createPlatformAdapter(): PlatformAdapter {
   switch (process.platform) {
@@ -28,11 +215,9 @@ export function createPlatformAdapter(): PlatformAdapter {
   }
 }
 
-const MAX_RETAINED_STATES = 64;
-
 export class MCPServer {
   private adapter: PlatformAdapter;
-  private lastStateMap = new Map<string, any>();
+  private lastStateMap = new Map<string, AppState>();
   private stateIdToAppRef = new Map<string, any>();
   private isControlHalted = false;
 
@@ -50,6 +235,26 @@ export class MCPServer {
       if (oldest === undefined) break;
       this.stateIdToAppRef.delete(oldest);
     }
+  }
+
+  private async attachPostActionState(
+    receipt: Record<string, any>,
+    returnState: string | undefined,
+    ref: any
+  ): Promise<Record<string, any>> {
+    if ((returnState !== "compact" && returnState !== "full") || !ref) {
+      return receipt;
+    }
+    const freshRaw = await this.adapter.getAppState(ref, {
+      detail: returnState === "full" ? "full" : "compact",
+    });
+    const safeState = sanitizeState(freshRaw);
+    if (safeState.state_id) {
+      this.rememberStateMapping(safeState.state_id, ref);
+    }
+    return returnState === "full"
+      ? { ...receipt, state: safeState }
+      : { ...receipt, compact_state: reduceToCompactState(safeState) };
   }
 
   getAdapter(): PlatformAdapter {
@@ -120,6 +325,24 @@ export class MCPServer {
       );
     }
 
+    const toolDef = MANIFEST_BY_NAME.get(name);
+    if (!toolDef) {
+      throw new InvalidArgumentError(`Tool not recognized: ${name}`);
+    }
+
+    if (name === "select_text") {
+      throw new UnsupportedPlatformError("select_text", this.adapter.platform);
+    }
+
+    if (
+      (this.adapter.platform === "win32" || this.adapter.platform === "linux") &&
+      !PLATFORM_AGNOSTIC_TOOLS.has(name)
+    ) {
+      throw new UnsupportedPlatformError(name, this.adapter.platform);
+    }
+
+    validateToolArgs(toolDef, args);
+
     switch (name) {
       // --- Capability Registry ---
       case "get_capabilities":
@@ -141,10 +364,7 @@ export class MCPServer {
           detail: detail === "full" ? "full" : "compact",
           include_screenshot: args.include_screenshot,
         });
-        const state = {
-          ...rawState,
-          tree: Array.isArray(rawState.tree) ? rawState.tree.map(redactElementSecrets) : [],
-        };
+        const state = sanitizeState(rawState);
 
         const appKey = args.app_ref?.name || String(args.app_ref?.pid || "default");
         const prevState = this.lastStateMap.get(appKey);
@@ -161,8 +381,11 @@ export class MCPServer {
 
         if (detail === "compact") {
           return reduceToCompactState(state);
-        } else if (detail === "diff" && prevState) {
-          return computeStateDiff(prevState, state);
+        } else if (detail === "diff") {
+          if (prevState) {
+            return computeStateDiff(prevState, state);
+          }
+          return { ...reduceToCompactState(state), diff_baseline_missing: true };
         }
         return state;
       }
@@ -187,24 +410,13 @@ export class MCPServer {
             ? modsRaw.split("+").map((s: string) => s.trim())
             : undefined;
         const clickReceipt = await this.adapter.click(args.target, {
-          clickCount: args.clickCount || 1,
+          clickCount: args.clickCount ?? 1,
           button: args.button || "left",
           strategy: args.strategy,
           modifiers: parsedMods,
         });
-        if ((args.return_state === "compact" || args.return_state === "full") && args.target?.state_id) {
-          const ref = this.stateIdToAppRef.get(args.target.state_id) || args.app_ref;
-          if (ref) {
-            const fresh = await this.adapter.getAppState(ref, {
-              detail: args.return_state === "full" ? "full" : "compact",
-            });
-            if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, ref);
-            return args.return_state === "full"
-              ? { ...clickReceipt, state: fresh }
-              : { ...clickReceipt, compact_state: reduceToCompactState(fresh) };
-          }
-        }
-        return clickReceipt;
+        const ref = (args.target?.state_id ? this.stateIdToAppRef.get(args.target.state_id) : undefined) || args.app_ref;
+        return await this.attachPostActionState(clickReceipt, args.return_state, ref);
       }
 
       case "double_click":
@@ -254,45 +466,22 @@ export class MCPServer {
           { strategy: args.strategy, clearFirst: args.clearFirst, appRef: args.app_ref },
           args.target
         );
-        if ((args.return_state === "compact" || args.return_state === "full") && args.app_ref) {
-          const fresh = await this.adapter.getAppState(args.app_ref, {
-            detail: args.return_state === "full" ? "full" : "compact",
-          });
-          if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, args.app_ref);
-          return args.return_state === "full"
-            ? { ...typeReceipt, state: fresh }
-            : { ...typeReceipt, compact_state: reduceToCompactState(fresh) };
-        }
-        return typeReceipt;
+        const ref = args.app_ref || (args.target?.state_id ? this.stateIdToAppRef.get(args.target.state_id) : undefined);
+        return await this.attachPostActionState(typeReceipt, args.return_state, ref);
       }
 
       case "press_key":
       case "key": {
         const keyInput = args.key ?? args.text;
-        if (!keyInput || typeof keyInput !== "string") {
-          throw new ComputerUseError("key/press_key requires a 'key' or 'text' string", "invalid_argument");
-        }
         if (typeof args.repeat === "number" && args.repeat === 0) {
           return { ok: true, action: "press_key", action_sent: false, receipt: "repeat=0 no-op" };
-        }
-        if (typeof args.repeat === "number" && args.repeat < 0) {
-          throw new ComputerUseError("Negative repeat is refused", "invalid_argument");
         }
         const keyReceipt = await this.adapter.pressKey(keyInput, args.modifiers, {
           appRef: args.app_ref,
           repeat: typeof args.repeat === "number" ? args.repeat : undefined,
           strategy: args.strategy,
         });
-        if ((args.return_state === "compact" || args.return_state === "full") && args.app_ref) {
-          const fresh = await this.adapter.getAppState(args.app_ref, {
-            detail: args.return_state === "full" ? "full" : "compact",
-          });
-          if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, args.app_ref);
-          return args.return_state === "full"
-            ? { ...keyReceipt, state: fresh }
-            : { ...keyReceipt, compact_state: reduceToCompactState(fresh) };
-        }
-        return keyReceipt;
+        return await this.attachPostActionState(keyReceipt, args.return_state, args.app_ref);
       }
 
       case "hotkey":
@@ -311,34 +500,27 @@ export class MCPServer {
 
       case "set_value": {
         const valReceipt = await this.adapter.setValue(args.target, args.value);
-        if (args.return_state === "compact" && args.target?.state_id) {
-          const ref = this.stateIdToAppRef.get(args.target.state_id);
-          if (ref) {
-            const fresh = await this.adapter.getAppState(ref, { detail: "compact" });
-            if (fresh?.state_id) this.rememberStateMapping(fresh.state_id, ref);
-            return { ...valReceipt, compact_state: reduceToCompactState(fresh) };
-          }
-        }
-        return valReceipt;
+        const ref = (args.target?.state_id ? this.stateIdToAppRef.get(args.target.state_id) : undefined) || args.app_ref;
+        return await this.attachPostActionState(valReceipt, args.return_state, ref);
       }
-
-      case "select_text":
-        throw new UnsupportedPlatformError("select_text", this.adapter.platform);
 
       // --- Window & App ---
       case "launch_app":
       case "open_application": {
         if (args.pid && !args.name && !args.bundle_id) {
-          if (args.activate ?? true) {
-            await this.adapter.focusApp({ pid: args.pid });
+          const appsBefore = await this.adapter.listApps();
+          const existing = appsBefore.find((a) => a.pid === args.pid);
+          if (!existing) {
+            throw new AppNotFoundError(String(args.pid));
           }
-          const apps = await this.adapter.listApps();
-          return apps.find((a) => a.pid === args.pid) || { pid: args.pid, name: String(args.pid), active: Boolean(args.activate ?? true) };
+          let focused = existing.active;
+          if (args.activate ?? true) {
+            focused = await this.adapter.focusApp({ pid: args.pid });
+          }
+          const appsAfter = await this.adapter.listApps();
+          return appsAfter.find((a) => a.pid === args.pid) || { ...existing, active: Boolean(focused) };
         }
         const targetIdent = args.bundle_id || args.name;
-        if (!targetIdent) {
-          throw new ComputerUseError("open_application requires 'name', 'bundle_id', or 'pid'", "invalid_argument");
-        }
         return await this.adapter.launchApp(targetIdent, args.activate ?? true);
       }
 
@@ -362,20 +544,24 @@ export class MCPServer {
 
       // --- High-level ---
       case "find_element": {
-        const state = await this.adapter.getAppState(args.app_ref, { detail: "compact" });
+        const state = sanitizeState(await this.adapter.getAppState(args.app_ref, { detail: "compact" }));
         const compact = reduceToCompactState(state);
         const match = compact.elements.find(
           (e) =>
             e.n.toLowerCase().includes(args.name.toLowerCase()) &&
-            (!args.role || e.r.toLowerCase() === args.role.toLowerCase())
+            (!args.role || e.r.toLowerCase() === String(args.role).toLowerCase())
         );
         return match || { not_found: true, searched_name: args.name };
       }
 
       case "click_element": {
-        const state = await this.adapter.getAppState(args.app_ref, { detail: "compact" });
+        const state = sanitizeState(await this.adapter.getAppState(args.app_ref, { detail: "compact" }));
         const compact = reduceToCompactState(state);
-        const matches = compact.elements.filter((e) => e.n.toLowerCase().includes(args.name.toLowerCase()));
+        const matches = compact.elements.filter(
+          (e) =>
+            e.n.toLowerCase().includes(args.name.toLowerCase()) &&
+            (!args.role || e.r.toLowerCase() === String(args.role).toLowerCase())
+        );
         if (matches.length === 0) throw new ElementNotFoundError(`Element "${args.name}" not found`);
         if (matches.length > 1) {
           throw new AmbiguousElementError(
@@ -393,9 +579,13 @@ export class MCPServer {
       }
 
       case "set_element_value": {
-        const state = await this.adapter.getAppState(args.app_ref, { detail: "compact" });
+        const state = sanitizeState(await this.adapter.getAppState(args.app_ref, { detail: "compact" }));
         const compact = reduceToCompactState(state);
-        const matches = compact.elements.filter((e) => e.n.toLowerCase().includes(args.name.toLowerCase()));
+        const matches = compact.elements.filter(
+          (e) =>
+            e.n.toLowerCase().includes(args.name.toLowerCase()) &&
+            (!args.role || e.r.toLowerCase() === String(args.role).toLowerCase())
+        );
         if (matches.length === 0) throw new ElementNotFoundError(`Element "${args.name}" not found`);
         if (matches.length > 1) {
           throw new AmbiguousElementError(
@@ -419,11 +609,18 @@ export class MCPServer {
 
       case "stop_computer_control":
         this.isControlHalted = true;
-        return { ok: true, action: "stop_computer_control", receipt: "Control session halted via kill-switch" };
+        await this.adapter.releaseHeldInputs?.();
+        return {
+          ok: true,
+          action: "stop_computer_control",
+          receipt: "Control session halted via kill-switch and held inputs released",
+        };
 
-      case "wait":
-        await new Promise((r) => setTimeout(r, args.ms || 1000));
-        return { ok: true, waited_ms: args.ms || 1000 };
+      case "wait": {
+        const ms = args.ms ?? 1000;
+        await new Promise((r) => setTimeout(r, ms));
+        return { ok: true, waited_ms: ms };
+      }
 
       case "read_clipboard":
         if (this.adapter.readClipboard) {
@@ -435,27 +632,32 @@ export class MCPServer {
       case "write_clipboard":
         if (this.adapter.writeClipboard) {
           await this.adapter.writeClipboard(args.text);
-          return { ok: true, text: args.text };
+          return { ok: true, length: args.text.length };
         }
         throw new UnsupportedPlatformError("write_clipboard", this.adapter.platform);
 
       default:
-        throw new ComputerUseError(`Tool not recognized: ${name}`, "invalid_argument");
+        throw new InvalidArgumentError(`Tool not recognized: ${name}`);
     }
   }
 
   startStdio(): void {
-    const rl = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: false,
-    });
-
     const sendResponse = (msg: Record<string, any>) => {
       process.stdout.write(JSON.stringify(msg) + "\n");
     };
 
     let requestQueue = Promise.resolve();
+    let shuttingDown = false;
+
+    const cleanExit = (code = 0) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      const forceTimer = setTimeout(() => process.exit(code), 1500);
+      forceTimer.unref?.();
+      Promise.resolve(this.adapter.releaseHeldInputs?.())
+        .catch(() => {})
+        .finally(() => process.exit(code));
+    };
 
     const processLine = async (line: string) => {
       const trimmed = line.trim();
@@ -465,11 +667,11 @@ export class MCPServer {
         const req = JSON.parse(trimmed);
         const { id, method, params } = req;
 
-        // Protocol handshake with version negotiation
         if (method === "initialize") {
-          const requestedProto = params?.protocolVersion || "2024-11-05";
-          const negotiatedVersion =
-            requestedProto === "2026-07-28" || requestedProto >= "2025" ? "2026-07-28" : "2024-11-05";
+          const requestedProto = typeof params?.protocolVersion === "string" ? params.protocolVersion : "2024-11-05";
+          const negotiatedVersion = SUPPORTED_PROTOCOL_VERSIONS.has(requestedProto)
+            ? requestedProto
+            : "2024-11-05";
 
           sendResponse({
             jsonrpc: "2.0",
@@ -481,7 +683,7 @@ export class MCPServer {
               },
               serverInfo: {
                 name: "macos-computer-use-kit",
-                version: "0.2.0",
+                version: SERVER_VERSION,
               },
             },
           });
@@ -497,7 +699,6 @@ export class MCPServer {
           return;
         }
 
-        // Tools listing
         if (method === "tools/list") {
           sendResponse({
             jsonrpc: "2.0",
@@ -509,10 +710,9 @@ export class MCPServer {
           return;
         }
 
-        // Tool execution
         if (method === "tools/call") {
           const toolName = params?.name;
-          const toolArgs = params?.arguments || {};
+          const toolArgs = params?.arguments ?? {};
           const toolMeta = params?._meta;
           const result = await this.handleCallTool(toolName, toolArgs, toolMeta);
           sendResponse({
@@ -523,7 +723,6 @@ export class MCPServer {
           return;
         }
 
-        // Unknown method
         if (id !== undefined) {
           sendResponse({
             jsonrpc: "2.0",
@@ -536,19 +735,71 @@ export class MCPServer {
       }
     };
 
-    // Strictly serialize JSON-RPC execution to uphold single-writer GUI safety
-    rl.on("line", (line) => {
-      requestQueue = requestQueue.then(() => processLine(line));
+    // Bounded line framing to prevent unbounded memory growth on malformed stdio streams
+    let buffer = "";
+    let discardingOversizedLine = false;
+
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk: string) => {
+      let start = 0;
+      while (start < chunk.length) {
+        const nlIdx = chunk.indexOf("\n", start);
+        if (nlIdx === -1) {
+          const tail = chunk.slice(start);
+          if (!discardingOversizedLine) {
+            if (Buffer.byteLength(buffer, "utf8") + Buffer.byteLength(tail, "utf8") > MAX_STDIO_LINE_BYTES) {
+              buffer = "";
+              discardingOversizedLine = true;
+            } else {
+              buffer += tail;
+            }
+          }
+          break;
+        }
+
+        const segment = chunk.slice(start, nlIdx);
+        start = nlIdx + 1;
+
+        if (discardingOversizedLine) {
+          discardingOversizedLine = false;
+          buffer = "";
+          sendResponse({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32600, message: "Invalid Request: JSON-RPC line exceeds 2 MiB limit" },
+          });
+          continue;
+        }
+
+        if (Buffer.byteLength(buffer, "utf8") + Buffer.byteLength(segment, "utf8") > MAX_STDIO_LINE_BYTES) {
+          buffer = "";
+          sendResponse({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32600, message: "Invalid Request: JSON-RPC line exceeds 2 MiB limit" },
+          });
+          continue;
+        }
+
+        const fullLine = buffer + segment;
+        buffer = "";
+        requestQueue = requestQueue.then(() => processLine(fullLine));
+      }
     });
 
-    rl.on("close", () => {
-      void requestQueue.finally(() => process.exit(0));
+    process.stdin.on("end", () => {
+      if (!discardingOversizedLine && buffer.trim()) {
+        const finalLine = buffer;
+        buffer = "";
+        requestQueue = requestQueue.then(() => processLine(finalLine));
+      }
+      void requestQueue.finally(() => cleanExit(0));
     });
 
     for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
       process.on(sig as any, () => {
-        process.stderr.write(`[mcp-server] Received ${sig}, shutting down cleanly...\n`);
-        process.exit(0);
+        process.stderr.write(`[mcp-server] Received ${sig}, releasing held inputs and shutting down...\n`);
+        cleanExit(0);
       });
     }
   }

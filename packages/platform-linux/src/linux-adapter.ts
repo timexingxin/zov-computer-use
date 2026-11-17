@@ -24,15 +24,15 @@ export class LinuxAdapter implements PlatformAdapter {
   readonly status = "experimental" as const;
 
   async listApps(): Promise<AppInfo[]> {
-    return [];
+    throw new UnsupportedPlatformError("listApps", "linux");
   }
 
   async listWindows(_appRef?: AppRef): Promise<WindowInfo[]> {
-    return [];
+    throw new UnsupportedPlatformError("listWindows", "linux");
   }
 
   async getActiveWindow(): Promise<WindowInfo | null> {
-    return null;
+    throw new UnsupportedPlatformError("getActiveWindow", "linux");
   }
 
   async getAppState(

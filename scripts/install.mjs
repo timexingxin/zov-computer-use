@@ -6,7 +6,7 @@
  * 1. Two production skills: `computer-use-orchestrator` & `zcode-computer-use` (with `rpc_probe.py`)
  * 2. Self-contained open-source macOS AX MCP Server (`@zcode-community/mcp-server`)
  * 3. Optional ZCode Native Helper bridges (`zcode-cua-bridge.mjs` & `zcode-cua-visible-bridge.mjs`)
- * 4. Non-destructive MCP configuration merge + automatic read-only protocol & subagent guard verification.
+ * 4. Atomic non-destructive MCP configuration merge + automatic read-only protocol & subagent guard verification.
  */
 import {
   chmodSync,
@@ -16,6 +16,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -26,6 +27,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
+const KIT_OWNERSHIP_MARKER = ".kit-owned.json";
 
 function parseArgs(argv) {
   const opts = {
@@ -59,7 +61,7 @@ Options:
   --preserve-skills                               Keep existing SKILL.md files if already customized
   --dry-run                                       Preview actions without modifying files
   --skip-probe                                    Skip post-install MCP stdio probe
-  --uninstall                                     Remove installed kit skills, runtime, and MCP entries
+  --uninstall                                     Remove kit-owned skills, runtime, and MCP entries
   -h, --help                                      Show help
 `);
       process.exit(0);
@@ -152,11 +154,35 @@ function resolveClientTargets(targetHome, clientOpt) {
   return detected.length > 0 ? detected : [definitions.antigravity];
 }
 
-function loadJsonSafe(path) {
+function loadJsonSafe(path, dryRun = false) {
   if (!existsSync(path)) return {};
   const raw = readFileSync(path, "utf-8").trim();
   if (!raw) return {};
-  return JSON.parse(raw);
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Top-level JSON value must be an object");
+    }
+    return parsed;
+  } catch (err) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const corruptBak = `${path}.corrupt-bak-${stamp}`;
+    if (!dryRun) {
+      try {
+        copyFileSync(path, corruptBak);
+      } catch {}
+    }
+    throw new Error(
+      `Malformed JSON in ${path} (${err.message}). Backed up original file to ${corruptBak} and aborted before modifying any files.`
+    );
+  }
+}
+
+function writeJsonAtomic(path, data) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  renameSync(tmpPath, path);
 }
 
 function backupIfExists(path, dryRun) {
@@ -165,6 +191,38 @@ function backupIfExists(path, dryRun) {
   const bak = `${path}.bak-${stamp}`;
   if (!dryRun) copyFileSync(path, bak);
   return bak;
+}
+
+function shouldBackupSkillDir(destSkill, templateDir) {
+  if (!existsSync(destSkill)) return false;
+  if (!existsSync(join(destSkill, KIT_OWNERSHIP_MARKER))) {
+    // Pre-existing user skill directory without kit ownership marker
+    return true;
+  }
+  const destMd = join(destSkill, "SKILL.md");
+  const tplMd = join(templateDir, "SKILL.md");
+  if (existsSync(destMd) && existsSync(tplMd)) {
+    if (readFileSync(destMd, "utf-8") !== readFileSync(tplMd, "utf-8")) {
+      return true;
+    }
+  }
+  // Also preserve if user placed extra files inside the skill directory
+  const entries = readdirSync(destSkill).filter((n) => n !== KIT_OWNERSHIP_MARKER);
+  const tplEntries = readdirSync(templateDir);
+  if (entries.some((e) => !tplEntries.includes(e))) {
+    return true;
+  }
+  return false;
+}
+
+function verifyPython3Available() {
+  try {
+    execFileSync("python3", ["-c", "import sys; assert sys.version_info >= (3, 9)"], { stdio: "pipe" });
+  } catch {
+    throw new Error(
+      "Python 3.9+ is required to run rpc_probe.py (run 'xcode-select --install' on macOS, or pass '--skip-probe')."
+    );
+  }
 }
 
 function main() {
@@ -176,18 +234,29 @@ function main() {
 
   const targets = resolveClientTargets(opts.home, opts.client);
 
+  // Preflight: parse and validate ALL target MCP config files BEFORE touching any files on disk
+  for (const t of targets) {
+    if (existsSync(t.mcpConfigPath)) {
+      loadJsonSafe(t.mcpConfigPath, opts.dryRun);
+    }
+  }
+
   if (opts.uninstall) {
     console.log("=== Uninstalling macOS Computer Use Kit ===");
     for (const t of targets) {
       for (const skillName of ["computer-use-orchestrator", "zcode-computer-use"]) {
         const sPath = join(t.skillsDir, skillName);
         if (existsSync(sPath)) {
-          console.log(`[remove] Skill: ${sPath}`);
-          if (!opts.dryRun) rmSync(sPath, { recursive: true, force: true });
+          if (existsSync(join(sPath, KIT_OWNERSHIP_MARKER))) {
+            console.log(`[remove] Kit-owned skill: ${sPath}`);
+            if (!opts.dryRun) rmSync(sPath, { recursive: true, force: true });
+          } else {
+            console.log(`[preserve] Skipping user-owned skill directory (no ${KIT_OWNERSHIP_MARKER}): ${sPath}`);
+          }
         }
       }
       if (existsSync(t.mcpConfigPath)) {
-        const cfg = loadJsonSafe(t.mcpConfigPath);
+        const cfg = loadJsonSafe(t.mcpConfigPath, opts.dryRun);
         if (cfg.mcpServers && typeof cfg.mcpServers === "object") {
           let modified = false;
           for (const key of ["zcode-cua", "zcode-cua-visible", "cua-open"]) {
@@ -200,7 +269,7 @@ function main() {
           }
           if (modified && !opts.dryRun) {
             backupIfExists(t.mcpConfigPath, opts.dryRun);
-            writeFileSync(t.mcpConfigPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+            writeJsonAtomic(t.mcpConfigPath, cfg);
           }
         }
       }
@@ -213,9 +282,24 @@ function main() {
     return;
   }
 
-  // Ensure built runtime exists
+  if (!opts.dryRun && !opts.skipProbe) {
+    verifyPython3Available();
+  }
+
+  // Ensure built runtime exists (including compiled macos-ax-helper on Darwin)
   const builtRuntime = join(rootDir, "dist", "runtime", "dist", "bin", "server.js");
-  if (!existsSync(builtRuntime)) {
+  const builtHelper = join(
+    rootDir,
+    "dist",
+    "runtime",
+    "node_modules",
+    "@zcode-community",
+    "platform-macos",
+    "dist",
+    "bin",
+    "macos-ax-helper"
+  );
+  if (!existsSync(builtRuntime) || (process.platform === "darwin" && !existsSync(builtHelper))) {
     console.log("[setup] Building workspace packages first...");
     if (!opts.dryRun) {
       execFileSync(process.execPath, [join(rootDir, "scripts", "build-all.mjs")], {
@@ -232,7 +316,7 @@ function main() {
   }
   if ((effectiveMode === "zcode" || effectiveMode === "both") && !zcodeAvailable) {
     console.warn(
-      "[warn] Local ZCode.app + CUA plugin cache not detected; falling back to pure open-source 'open' mode."
+      "[warn] Compatible local ZCode CUA helper not detected; falling back to pure open-source 'open' mode."
     );
     effectiveMode = "open";
   }
@@ -249,6 +333,18 @@ function main() {
     mkdirSync(runtimeTarget, { recursive: true });
     cpSync(join(rootDir, "dist", "runtime"), runtimeTarget, { recursive: true });
     chmodSync(join(runtimeTarget, "dist", "bin", "server.js"), 0o755);
+    const installedHelper = join(
+      runtimeTarget,
+      "node_modules",
+      "@zcode-community",
+      "platform-macos",
+      "dist",
+      "bin",
+      "macos-ax-helper"
+    );
+    if (existsSync(installedHelper)) {
+      chmodSync(installedHelper, 0o755);
+    }
 
     mkdirSync(bridgesTarget, { recursive: true });
     for (const b of ["zcode-cua-bridge.mjs", "zcode-cua-visible-bridge.mjs"]) {
@@ -279,31 +375,40 @@ function main() {
       for (const skillName of ["computer-use-orchestrator", "zcode-computer-use"]) {
         const destSkill = join(t.skillsDir, skillName);
         const existingSkillMd = join(destSkill, "SKILL.md");
-        const templateSkillMd = join(rootDir, "skills", skillName, "SKILL.md");
+        const templateDir = join(rootDir, "skills", skillName);
         if (opts.preserveSkills && existsSync(existingSkillMd)) {
           console.log(`[2/3] Preserved customized skill -> ${existingSkillMd}`);
           continue;
         }
-        let prevSkillContent = null;
-        if (existsSync(existingSkillMd)) {
-          const cur = readFileSync(existingSkillMd, "utf-8");
-          const next = readFileSync(templateSkillMd, "utf-8");
-          if (cur !== next) prevSkillContent = cur;
+        if (shouldBackupSkillDir(destSkill, templateDir)) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          const dirBak = `${destSkill}.bak-${stamp}`;
+          cpSync(destSkill, dirBak, { recursive: true });
+          console.log(`      Backed up existing skill directory -> ${dirBak}`);
         }
         rmSync(destSkill, { recursive: true, force: true });
-        cpSync(join(rootDir, "skills", skillName), destSkill, { recursive: true });
-        if (prevSkillContent !== null) {
-          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          writeFileSync(join(destSkill, `SKILL.md.bak-${stamp}`), prevSkillContent, "utf-8");
-        }
+        cpSync(templateDir, destSkill, { recursive: true });
+        writeFileSync(
+          join(destSkill, KIT_OWNERSHIP_MARKER),
+          JSON.stringify(
+            {
+              installed_by: "macos-computer-use-kit",
+              skill: skillName,
+              installed_at: new Date().toISOString(),
+            },
+            null,
+            2
+          ) + "\n",
+          "utf-8"
+        );
       }
       const probeScript = join(t.skillsDir, "zcode-computer-use", "scripts", "rpc_probe.py");
       if (existsSync(probeScript)) chmodSync(probeScript, 0o755);
     }
     console.log(`[2/3] Installed skills (computer-use-orchestrator, zcode-computer-use) -> ${t.skillsDir}`);
 
-    const cfg = loadJsonSafe(t.mcpConfigPath);
-    if (!cfg.mcpServers || typeof cfg.mcpServers !== "object") {
+    const cfg = loadJsonSafe(t.mcpConfigPath, opts.dryRun);
+    if (!cfg.mcpServers || typeof cfg.mcpServers !== "object" || Array.isArray(cfg.mcpServers)) {
       cfg.mcpServers = {};
     }
 
@@ -319,26 +424,27 @@ function main() {
       cfg.mcpServers["zcode-cua"] = zcodeBridgeEntry;
       cfg.mcpServers["zcode-cua-visible"] = zcodeVisibleEntry;
     } else {
-      // both
       cfg.mcpServers["zcode-cua"] = zcodeBridgeEntry;
       cfg.mcpServers["zcode-cua-visible"] = zcodeVisibleEntry;
       cfg.mcpServers["cua-open"] = openServerEntry;
     }
 
     if (!opts.dryRun) {
-      mkdirSync(dirname(t.mcpConfigPath), { recursive: true });
       const bak = backupIfExists(t.mcpConfigPath, opts.dryRun);
       if (bak) console.log(`      Backed up existing config -> ${bak}`);
-      writeFileSync(t.mcpConfigPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+      writeJsonAtomic(t.mcpConfigPath, cfg);
     }
     console.log(`      Updated MCP config -> ${t.mcpConfigPath}`);
   }
 
-  // 3. Run read-only MCP handshake & subagent guard probe
+  // 3. Run read-only MCP handshake, helper binary smoke check & subagent guard probe
   if (!opts.dryRun && !opts.skipProbe) {
     const primaryTarget = targets[0];
-    const probePy = join(primaryTarget.skillsDir, "zcode-computer-use", "scripts", "rpc_probe.py");
-    console.log("[3/3] Verifying MCP stdio handshake & subagent safety guard...");
+    let probePy = join(primaryTarget.skillsDir, "zcode-computer-use", "scripts", "rpc_probe.py");
+    if (!existsSync(probePy)) {
+      probePy = join(rootDir, "skills", "zcode-computer-use", "scripts", "rpc_probe.py");
+    }
+    console.log("[3/3] Verifying MCP stdio handshake, native helper readiness & subagent safety guard...");
     execFileSync(
       "python3",
       [probePy, "--config", primaryTarget.mcpConfigPath, "--server", "zcode-cua", "--guard"],

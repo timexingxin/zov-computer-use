@@ -104,8 +104,8 @@ class MockAdapter {
   }
 }
 
-test("Tools Manifest adheres to MCP standards and provides 30+ tools", () => {
-  assert.ok(TOOLS_MANIFEST.length >= 30, `Expected >= 30 tools, got ${TOOLS_MANIFEST.length}`);
+test("Tools Manifest adheres to MCP standards and provides all 47 tools", () => {
+  assert.equal(TOOLS_MANIFEST.length, 47, `Expected exactly 47 tools, got ${TOOLS_MANIFEST.length}`);
 
   for (const tool of TOOLS_MANIFEST) {
     assert.ok(tool.name && typeof tool.name === "string", "Tool must have a string name");

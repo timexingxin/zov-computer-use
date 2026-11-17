@@ -66,7 +66,7 @@ Two target formats are supported:
 Rules:
 - Always prefer an element target when the observed AX tree contains the control.
 - Never translate image pixel coordinates into an element target.
-- When using a coordinate target, choose `x` and `y` strictly from the most recently returned screenshot raster.
+- **Retina Pixel-to-Point Conversion**: On macOS, `screenshot` returns physical PNG pixel dimensions (`width`, `height`) alongside `scale_factor` (typically `2` on Retina) and logical `point_width` / `point_height`, whereas `click` / `move_pointer` operate in Quartz global **point** coordinates. Divide pixel coordinates read from a screenshot raster by `scale_factor` (`x = Math.round(px_x / scale_factor)`, `y = Math.round(px_y / scale_factor)`), and add the window's `bounds.x` / `bounds.y` offset if the screenshot was window-scoped (`window_id`).
 
 ## 4. Action Strategy & Focus Safety
 
@@ -90,9 +90,9 @@ When automating native `NSOpenPanel` / `NSSavePanel` path selection and foregrou
 
 ## 6. Retry Safety & Kill Switch
 
-- When an error reports `action_sent: true`, the side effect may already have occurred—**never blindly replay it**; re-observe with `get_app_state` first.
-- When `action_sent: false` (e.g., `stale_handle`), call `get_app_state` to obtain a fresh `state_id` before retrying.
-- Call `stop_computer_control` to halt automation immediately in any unexpected state. Once stopped, start a new MCP session before resuming future authorized tasks.
+- When an error reports `action_sent: true` (including `code: "timeout"` on any mutating click, key, or typing tool), partial or full GUI input may already have been delivered to the OS—**never blindly replay the action**; always call `get_app_state` first to verify what already took effect.
+- Only when `action_sent: false` (e.g., `stale_handle`, `element_not_found`, `invalid_argument`, `foreground_required`) has zero OS input been sent; re-observe with `get_app_state` to obtain a fresh `state_id` or resolve occlusion before retrying.
+- Call `stop_computer_control` to halt automation immediately in any unexpected state. Once stopped, all subsequent calls on the session (except `get_capabilities`, `wait`, and `stop_computer_control`) fail closed and tracked held mouse buttons are released; start a new MCP session before resuming future authorized tasks.
 
 ## 7. Tool Surface Summary
 

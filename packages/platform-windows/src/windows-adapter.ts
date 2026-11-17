@@ -1,5 +1,3 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
 import {
   type ActionResult,
   type AppInfo,
@@ -12,78 +10,29 @@ import {
   type Target,
   type TypeOptions,
   type WindowInfo,
-  ComputerUseError,
   UnsupportedPlatformError,
 } from "@zcode-community/core";
-
-const execFile = promisify(execFileCallback);
 
 /**
  * Windows Platform Adapter.
  * Status: Experimental / Skeleton.
- * In accordance with the Zero Fake-Success Policy (Option B), operations that
- * are not yet verified on live Windows hardware throw UnsupportedPlatformError.
+ * Strictly enforces Zero Fake-Success Policy: all unverified native Windows
+ * operations throw UnsupportedPlatformError with zero shell/PowerShell execution.
  */
 export class WindowsAdapter implements PlatformAdapter {
   readonly platform = "win32" as const;
   readonly status = "experimental" as const;
 
-  private isWindows = process.platform === "win32";
-
-  private async runPowerShell<T>(command: string): Promise<T> {
-    if (!this.isWindows) {
-      throw new UnsupportedPlatformError("runPowerShell", process.platform);
-    }
-    try {
-      const { stdout } = await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command]);
-      const trimmed = stdout.trim();
-      if (!trimmed) return [] as unknown as T;
-      return JSON.parse(trimmed);
-    } catch (err: any) {
-      throw new ComputerUseError(`PowerShell execution failed: ${err.message}`, "operation_failed");
-    }
-  }
-
   async listApps(): Promise<AppInfo[]> {
-    if (!this.isWindows) {
-      return [];
-    }
-    const ps = `
-      Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object Id, ProcessName, @{Name="Active";Expression={$_.MainWindowHandle -eq (Get-Process | Select -First 1).MainWindowHandle}} | ConvertTo-Json -Compress
-    `;
-    const data = await this.runPowerShell<any[]>(ps);
-    const list = Array.isArray(data) ? data : [data];
-    return list.filter(Boolean).map((p) => ({
-      pid: p.Id,
-      name: p.ProcessName,
-      active: !!p.Active,
-    }));
+    throw new UnsupportedPlatformError("listApps", "win32");
   }
 
-  async listWindows(appRef?: AppRef): Promise<WindowInfo[]> {
-    if (!this.isWindows) {
-      return [];
-    }
-    const filter = appRef?.pid ? `| Where-Object { $_.Id -eq ${appRef.pid} }` : "";
-    const ps = `
-      Get-Process ${filter} | Where-Object { $_.MainWindowTitle.Length -gt 0 } | Select-Object Id, MainWindowTitle, ProcessName | ConvertTo-Json -Compress
-    `;
-    const data = await this.runPowerShell<any[]>(ps);
-    const list = Array.isArray(data) ? data : [data];
-    return list.filter(Boolean).map((w, idx) => ({
-      id: w.Id * 1000 + idx,
-      pid: w.Id,
-      title: w.MainWindowTitle,
-      app_name: w.ProcessName,
-      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-      is_minimized: false,
-      is_focused: idx === 0,
-    }));
+  async listWindows(_appRef?: AppRef): Promise<WindowInfo[]> {
+    throw new UnsupportedPlatformError("listWindows", "win32");
   }
 
   async getActiveWindow(): Promise<WindowInfo | null> {
-    const wins = await this.listWindows();
-    return wins[0] || null;
+    throw new UnsupportedPlatformError("getActiveWindow", "win32");
   }
 
   async getAppState(
@@ -101,35 +50,12 @@ export class WindowsAdapter implements PlatformAdapter {
     throw new UnsupportedPlatformError("takeScreenshot", "win32");
   }
 
-  async launchApp(nameOrPath: string): Promise<AppInfo> {
-    if (!this.isWindows) {
-      throw new UnsupportedPlatformError("launchApp", process.platform);
-    }
-    await this.runPowerShell(`Start-Process "${nameOrPath}"`);
-    return {
-      pid: 0,
-      name: nameOrPath,
-      active: true,
-    };
+  async launchApp(_nameOrPath: string): Promise<AppInfo> {
+    throw new UnsupportedPlatformError("launchApp", "win32");
   }
 
-  async focusApp(appRef: AppRef): Promise<boolean> {
-    if (!this.isWindows) {
-      throw new UnsupportedPlatformError("focusApp", process.platform);
-    }
-    const filter = appRef.pid ? `Id -eq ${appRef.pid}` : `ProcessName -eq '${appRef.name}'`;
-    const ps = `
-      $proc = Get-Process | Where-Object { ${filter} } | Select-Object -First 1
-      if ($proc -and $proc.MainWindowHandle) {
-        $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
-        $type = Add-Type -MemberDefinition $sig -Name "Win32Util" -Namespace "ZCode" -PassThru
-        $type::SetForegroundWindow($proc.MainWindowHandle)
-      } else {
-        $false
-      }
-    `;
-    const res = await this.runPowerShell<boolean>(ps).catch(() => false);
-    return !!res;
+  async focusApp(_appRef: AppRef): Promise<boolean> {
+    throw new UnsupportedPlatformError("focusApp", "win32");
   }
 
   async focusWindow(_windowId: number): Promise<boolean> {

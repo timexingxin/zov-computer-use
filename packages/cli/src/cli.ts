@@ -37,6 +37,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
       console.log(`[${report.checks.runtime.valid ? "PASS" : "FAIL"}] Node.js Runtime: v${report.checks.runtime.node_version} (>= 20 required)`);
       console.log(`[${report.checks.os.supported ? "PASS" : "WARN"}] Operating System: ${report.checks.os.platform} (${report.checks.os.arch})`);
+      console.log(`[${report.checks.environment.native_ax_helper ? "PASS" : "FAIL"}] Native AX Helper: ${report.checks.environment.native_ax_helper ? "Compiled & Ready" : "Missing (run npm run build on macOS)"}`);
       console.log(`[${report.checks.permissions.accessibility ? "PASS" : "WARN"}] Accessibility Permission: ${report.checks.permissions.accessibility ? "Granted" : "Not Granted / Untrusted"}`);
       console.log(`[${report.checks.permissions.screen_recording ? "PASS" : "WARN"}] Screen Recording Permission: ${report.checks.permissions.screen_recording ? "Granted" : "Not Granted"}`);
       console.log(`[${report.checks.environment.gui_session ? "PASS" : "WARN"}] GUI Session: ${report.checks.environment.gui_session ? "Active Aqua Session" : "Headless / Non-interactive"}`);

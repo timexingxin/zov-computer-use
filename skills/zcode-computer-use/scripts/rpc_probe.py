@@ -251,6 +251,18 @@ async def probe(options):
         if receipt["tool_count"] == 0:
             raise ProbeError("empty_tools", "Server returned 0 tools")
 
+        if sys.platform == "darwin":
+            apps_res = await client.request(
+                "tools/call",
+                {
+                    "name": "list_apps",
+                    "arguments": {},
+                },
+            )
+            if apps_res.get("isError"):
+                raise ProbeError("native_helper_unavailable", f"list_apps failed on darwin: {apps_res}")
+            receipt["darwin_list_apps_ok"] = True
+
         if options.guard:
             result = await client.request(
                 "tools/call",

@@ -31,7 +31,7 @@ This skill orchestrates native macOS desktop automation across available Model C
 
 | Backend | Primary Characteristics & Operational Boundaries |
 | --- | --- |
-| `zcode-cua` (Open-Source Built-in Mode) | Zero-proprietary-binary macOS AX + CoreGraphics MCP server (`@zcode-community/mcp-server`). Uses stable semantic handles (`h_*`), compact/diff tree compression, and background-safe `click`/`set_value`/`perform_action`. Works out of the box on any Mac with Node.js >= 20. |
+| `zcode-cua` (Open-Source Built-in Mode) | Zero-proprietary-binary macOS AX + CoreGraphics MCP server (`@zcode-community/mcp-server`). Uses stable semantic handles (`h_*`), compact/diff tree compression, and background-safe `click`/`set_value`/`perform_action`. Works on any Mac with Node.js >= 20 and Xcode Command Line Tools (`swiftc`). |
 | `zcode-cua` (ZCode Native Helper Mode) | Bridges a locally installed `ZCode.app` CUA Helper when present. Always pass `app_ref` as an object `{"pid": 12345, "bundle_id": "..."}` (never a `"pid:..."` string). Enumerates standard GUI apps (`NSApplicationActivationPolicyRegular`). Prefer `strategy="a11y"` for zero-focus background operations. |
 | `zcode-cua-visible` | Optional ZCode bridge with `GhostCursor` visual overlay enabled under an isolated `XDG_RUNTIME_DIR`. Use only when visual trajectory demonstration is requested; never run concurrently against the same window as `zcode-cua`. |
 | `cua-open` | Explicit alias registered alongside ZCode bridge mode so the pure open-source macOS AX MCP server remains available as an audited fallback. |
@@ -49,6 +49,6 @@ This skill orchestrates native macOS desktop automation across available Model C
 
 ## 6. Kill-Switch & Post-Stop Recovery (V2.2)
 
-- `stop_computer_control` acts as a session-level kill switch, not a temporary window lock release. Once invoked (`"Computer control was stopped ... Start a new session"`), subsequent mutating calls on the same MCP session fail closed.
+- `stop_computer_control` acts as a session-level kill switch, not a temporary window lock release. Once invoked (`"Computer control was stopped ... Start a new session"`), all subsequent calls on the same MCP session (both mutating and observation tools, except `get_capabilities`, `wait`, and `stop_computer_control`) fail closed and tracked held mouse inputs are released.
 - Do not loop `request_access` or mutate runtime directories to bypass a stopped session. Resume only in a newly authorized MCP session after confirming prior actions have settled, and never automatically replay the halted action.
 - If controller readiness reports `CUA_CONTROLLER_BUSY`, halt GUI writes immediately, preserve user state, and continue only non-GUI work until ownership is released cleanly.

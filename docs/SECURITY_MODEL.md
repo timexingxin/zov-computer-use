@@ -1,6 +1,6 @@
 # Security Model & Trust Boundaries
 
-`macos-computer-use-kit` possesses high system privileges (UI inspection, synthetic keyboard and mouse input, screen capture). This document formalizes its security architecture and boundary enforcement.
+`macos-computer-use-kit` exercises privileged local OS capabilities (UI tree inspection, synthetic keyboard/mouse events, screen capture). This document states the exact runtime boundaries enforced in code—without overclaiming guarantees that only the host OS or agent client can enforce.
 
 ---
 
@@ -8,68 +8,69 @@
 
 ```mermaid
 flowchart TD
-    subgraph UntrustedZone["External & Remote Network (Untrusted)"]
-        Internet["Public Internet"]
-        RemoteAgents["Remote AI Agents"]
+    subgraph UntrustedZone["External & Remote Network (No Direct Transport)"]
+        Internet["Public Internet / Untrusted Web Content"]
     end
 
-    subgraph HostBoundary["Host Computer (Local Machine - Trust Zone)"]
-        subgraph LocalMCPClient["Authenticated Local Client"]
-            ZCodeHost["ZCode Desktop App / CLI"]
-            LocalAgent["Local Agent (Antigravity / Claude Code / Codex)"]
+    subgraph HostBoundary["Host Computer (Local User Account)"]
+        subgraph LocalMCPClient["Local MCP Host Process"]
+            LocalAgent["Local Agent Host (Antigravity / Claude Code / Cursor)"]
         end
 
         subgraph CUAProcess["macos-computer-use-kit Runtime (Stdio Only)"]
-            MCPEndpoint["MCP Server (Local Stdio Only)"]
-            AuditLog["Audit Redaction Engine"]
-            SafetyLatch["Destructive Action Gate & Kill Switch"]
-            CoreEngine["Core Automation Controller"]
+            MCPEndpoint["MCP Server (Local Stdio, 2 MiB Line Cap)"]
+            SchemaGate["Runtime Schema & Finite Bounds Validator"]
+            Redactor["Password Field & Receipt Redactor"]
+            SafetyLatch["Session Kill Switch & Held-Input Releaser"]
+            CoreEngine["macOS Native AX + CoreGraphics Adapter"]
         end
 
         subgraph OSProtectedLayer["OS-Protected Resources"]
             AXAPIs["macOS Accessibility (TCC Protected)"]
             ScreenRecording["Screen Recording (TCC Protected)"]
-            Keychain["OS Keychain / Credentials (PROHIBITED ACCESS)"]
-            UserFiles["Local File System"]
+            Keychain["OS Keychain / Browser Cookie Stores (Never Accessed)"]
         end
     end
 
-    Internet -.->|BLOCKED BY DEFAULT| MCPEndpoint
-    RemoteAgents -.->|Requires Explicit Token Auth| MCPEndpoint
-    LocalAgent -->|stdio stream| MCPEndpoint
-    ZCodeHost -->|stdio stream| MCPEndpoint
+    Internet -.->|Prompt-Injection Data Surface Only| LocalAgent
+    LocalAgent -->|stdio JSON-RPC| MCPEndpoint
 
     MCPEndpoint --> SafetyLatch
-    SafetyLatch --> AuditLog
-    AuditLog --> CoreEngine
+    SafetyLatch --> SchemaGate
+    SchemaGate --> CoreEngine
+    CoreEngine --> Redactor
 
     CoreEngine --> AXAPIs
     CoreEngine --> ScreenRecording
-    CoreEngine -.->|STRICT NO ACCESS| Keychain
+    CoreEngine -.->|No Code Path Accesses| Keychain
 ```
 
 ---
 
-## 2. Security Invariants
+## 2. Enforced Security Properties & Known Boundaries
 
-### 1. Local-Only Stdio Transport
-- The MCP server communicates strictly over local standard I/O (`stdio`) with zero open TCP/HTTP sockets.
+### 1. Local-Only Stdio Transport (No Network Listener)
+- `@zcode-community/mcp-server` communicates strictly over local `stdin`/`stdout` with zero TCP/HTTP/WebSocket listeners and no built-in remote authentication layer. Never expose its `stdio` pipes directly over an unauthenticated network socket.
+-(Note: per-session token files apply only to the optional legacy ZCode Unix-domain socket bridge in `bridges/`.)
 
-### 2. Zero Secret Harvesting & Zero Cookie Extraction
-- The runtime explicitly **forbids** accessing web browser cookies, session stores, or saved password databases.
-- The runtime does not attempt to dump the macOS Keychain or Windows Credential Manager.
+### 2. Zero Keychain or Browser Storage Harvesting
+- The codebase contains zero routines that read macOS Keychain databases, browser cookie SQLite stores, or saved credential files.
 
-### 3. Secret Redaction in Logs & State
-- State trees and diagnostic logs pass through an automatic redaction filter.
-- Password input fields (`secureTextField`, `AXSecureTextField`) have their text contents replaced with `[REDACTED_PASSWORD]`.
-- API keys, Bearer tokens, and sensitive authorization headers are scrubbed before logging.
+### 3. Password Redaction & Receipt Hygiene (and Detection Boundary)
+- Every state returned by `get_app_state` (`compact`, `diff`, `full`) and every post-action `return_state` refresh (`click`/`left_click`, `type`/`type_text`, `key`/`press_key`, `set_value`) passes through `redactElementSecrets`.
+- Fields with `role`/`subrole` `securetextfield` **or** editable fields (`textfield`, `textarea`, `combobox`, `searchfield`) whose `name`, `description`, or `identifier` matches password keywords (`password`, `passcode`, `passwd`, `pin code`, `密码`, `口令`) have non-empty values replaced with `[REDACTED_PASSWORD]`.
+- `set_value` and `write_clipboard` receipts report character lengths rather than echoing plaintext values.
+- **Known Boundary**: Custom web/canvas inputs exposed as generic `textfield` without `securetextfield` subrole or password-related accessibility labels cannot be distinguished from ordinary text inputs; arbitrary non-password secrets visible on screen (e.g., API keys in plain terminal windows or screenshots) are **not** automatically scrubbed.
 
-### 4. Emergency Kill Switch (`stop_computer_control`)
-- At any moment during an automated workflow, an agent or human operator can trigger `stop_computer_control`.
-- The runtime immediately revokes any active synthetic events, drops pending action queues, and terminates state locks.
+### 4. Timeout Replay Prevention (`action_sent: true`)
+- Multi-step OS input helpers (`click-coord`, `key`, `type-unicode`, `act-element`, `pointer-op`, `window-op`) run in isolated process groups. If a mutating helper exceeds its deadline and is terminated, `MacOSAdapter` throws `TimeoutError` with `action_sent: true` so agents re-observe rather than blindly replaying partially delivered clicks or keystrokes.
 
-### 5. Destructive Action Guardrails
-- Operations involving system deletion (`rm -rf`, emptying trash), financial transactions, or system configuration modification are flagged. Agents are instructed via skill prompts to request explicit user confirmation prior to execution.
+### 5. Session Kill Switch (`stop_computer_control`)
+- Invoking `stop_computer_control` latches `isControlHalted = true` for the lifetime of the MCP process: **all** subsequent tool calls (both mutating and read-only observation tools, except `get_capabilities`, `wait`, and `stop_computer_control`) fail closed, active helper process groups receive `SIGTERM`, temporary screenshot files are unlinked, and compensating `mouse_up` events are dispatched for any mouse buttons recorded via `mouse_down`.
+- **Known Boundary**: OS input events already posted to `WindowServer` prior to `stop_computer_control` cannot be retroactively revoked.
 
-### 6. No Telemetry or Call-Home
-- `macos-computer-use-kit` contains zero analytics trackers, telemetry reporters, or external network call-home probes.
+### 6. Cooperative Subagent Guard (`_meta`)
+- When a host client attaches `_meta["com.zcode/request-context"].runtime_scope === "subagent"`, `handleCallTool` refuses execution with `SUBAGENT_COMPUTER_USE_UNAVAILABLE`. Because `_meta` is supplied by the MCP client over local `stdio`, this is a cooperative serialization guard against multi-agent desktop races—not a cryptographic privilege boundary against a compromised host process.
+
+### 7. Zero Telemetry
+- `macos-computer-use-kit` makes zero outbound network requests, analytics pings, or update checks.

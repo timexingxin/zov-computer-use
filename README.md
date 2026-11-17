@@ -19,8 +19,8 @@ Clone once, run `./install.sh`, grant macOS Accessibility permission, and your a
    - **`zcode-computer-use`**: Concrete execution loop (`Observe → Act → Verify`), GOOD/DEGRADED/FAILED state triage, atomic `return_state="compact"` updates, `NSOpenPanel`/`NSSavePanel` (`⌘⇧G`) handling, destructive action guards, and a zero-dependency read-only verifier (`scripts/rpc_probe.py`).
 2. **Self-Contained Open-Source macOS AX MCP Server (`packages/`)**
    - Zero proprietary binaries and zero runtime npm dependencies—powered by a clean-room native Swift `ApplicationServices` + `CoreGraphics` helper (`macos-ax-helper`, compiled locally during `install.sh` / `npm run build`).
-   - Deep accessibility tree traversal (up to depth 20 in <100ms, supporting native AppKit/SwiftUI, Electron, Chromium, WebKit, and QtWebEngine), zero-focus background `AXPress`, occlusion-verified coordinate fallback for non-`AXPress` controls, `CGEvent.postToPid` background keys, and automatic password-field redaction.
-   - Exposes 40+ standardized tools (`list_apps`, `list_windows`, `get_app_state`, `left_click`/`click`, `set_value`, `perform_action`, `open_application`/`launch_app`, `screenshot`, `request_access`, `stop_computer_control`, clipboard tools, and compact/diff context compression).
+   - Deep accessibility tree traversal (up to depth 20, typical ~100ms capture on responsive apps with an 8s bounded wall-clock budget for hung views; supporting native AppKit/SwiftUI, Electron, Chromium, WebKit, and QtWebEngine), zero-focus background `AXPress`, occlusion-verified coordinate fallback for non-`AXPress` controls, `CGEvent.postToPid` background keys, and automatic password-field redaction.
+   - Exposes 47 standardized tools (`list_apps`, `list_windows`, `get_app_state`, `left_click`/`click`, `set_value`, `perform_action`, `open_application`/`launch_app`, `screenshot`, `request_access`, `stop_computer_control`, clipboard tools, and compact/diff context compression).
 3. **Optional Legacy ZCode Helper Bridges (`bridges/`)**
    - By default (and on Macs with ZCode >= 3.18.0 where external bridge connections are restricted by `verifyPeer`), `zcode-cua` points directly to the built-in open-source macOS AX MCP server—**no third-party app required**.
    - On legacy ZCode (< 3.18.0) installations, optional `zcode-cua-bridge.mjs` and `zcode-cua-visible-bridge.mjs` remain available while keeping the open-source server registered as `cua-open`.
@@ -31,8 +31,8 @@ Clone once, run `./install.sh`, grant macOS Accessibility permission, and your a
 
 ### Prerequisites
 - **macOS 13+** (Apple Silicon or Intel)
+- **Xcode Command Line Tools** (`xcode-select --install` — provides `/usr/bin/swiftc` to compile `macos-ax-helper` and `python3` 3.9+ for the post-install `rpc_probe.py` health check)
 - **Node.js >= 20** (`node -v`)
-- **Python 3.9+** (pre-installed on macOS, used only for the optional read-only `rpc_probe.py` health check)
 
 ### Install
 
@@ -111,8 +111,8 @@ npm test
 
 - **Background-First, Focus-Safe**: Semantic AX actions (`click`, `set_value`, `perform_action`) act directly on element references without moving the physical pointer or stealing foreground focus.
 - **Zero Fake-Success Policy**: Unsupported operations fail closed with structured error codes (`unsupported_platform`, `stale_handle`, `ambiguous_element`, `permission_denied`).
-- **Main-Agent Serialization Guard**: Rejects subagent GUI mutation calls (`SUBAGENT_COMPUTER_USE_UNAVAILABLE`) to prevent concurrent multi-agent desktop race conditions.
-- **Emergency Kill Switch**: Calling `stop_computer_control` immediately halts mutating operations on the active MCP session.
+- **Main-Agent Serialization Guard**: Cooperative metadata check (`SUBAGENT_COMPUTER_USE_UNAVAILABLE`) keeps desktop GUI calls serialized on the main agent.
+- **Emergency Kill Switch**: Calling `stop_computer_control` immediately halts all subsequent calls on the active MCP session (except `get_capabilities`, `wait`, and `stop_computer_control`) and releases tracked held mouse inputs.
 
 ---
 

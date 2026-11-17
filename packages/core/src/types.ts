@@ -177,7 +177,14 @@ export interface PlatformAdapter {
   listWindows(appRef?: AppRef): Promise<WindowInfo[]>;
   getActiveWindow(): Promise<WindowInfo | null>;
   getAppState(appRef: AppRef, options?: { detail?: "compact" | "full"; include_screenshot?: boolean }): Promise<AppState>;
-  takeScreenshot(options?: { window_id?: number; display_id?: number }): Promise<{ base64: string; width: number; height: number }>;
+  takeScreenshot(options?: { window_id?: number; display_id?: number }): Promise<{
+    base64: string;
+    width: number;
+    height: number;
+    scale_factor?: number;
+    point_width?: number;
+    point_height?: number;
+  }>;
   
   // App & Window Control
   launchApp(nameOrBundleId: string, activate?: boolean): Promise<AppInfo>;
@@ -217,4 +224,5 @@ export interface PlatformAdapter {
   // System & Permission
   checkPermissions(): Promise<PermissionReport>;
   requestAccess(types?: ("accessibility" | "screen_recording")[]): Promise<PermissionReport>;
+  releaseHeldInputs?(): Promise<void>;
 }

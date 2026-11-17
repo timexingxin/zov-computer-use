@@ -18,8 +18,8 @@
    - **`zcode-computer-use`**：具体工具执行协议——规范 `Observe → Act → Verify` 闭环、状态质量分级（GOOD / DEGRADED / FAILED）、`return_state="compact"` 单轮原子刷新、macOS 原生文件选择框（`⌘⇧G`）处理、高危动作护栏，并附带零依赖只读验收探针 `scripts/rpc_probe.py`。
 2. **内置纯开源 macOS AX MCP 服务端（`packages/`）**
    - 零闭源二进制、零第三方运行时依赖，安装时通过本机 `/usr/bin/swiftc` 编译原生 `ApplicationServices` + `CoreGraphics` 引擎（`macos-ax-helper`），无需触发 `System Events` 自动化弹窗。
-   - 支持最高 20 层深层无障碍树毫秒级采集（兼容 AppKit/SwiftUI、Electron、Chromium、WebKit 及 QtWebEngine）、后台零焦点 `AXPress`、针对无原生 `AXPress` 控件（如 Qt6/Anki）的遮挡校验坐标兜底、`postToPid` 后台按键及密码框自动脱敏（`[REDACTED_PASSWORD]`）。
-   - 提供 40+ 标准工具（`list_apps`、`list_windows`、`get_app_state`、`left_click`/`click`、`set_value`、`perform_action`、`open_application`/`launch_app`、`screenshot`、`request_access`、`stop_computer_control`、剪贴板读写及紧凑/增量状态压缩）。
+   - 支持最高 20 层深层无障碍树采集（响应正常应用约百毫秒级返回，并对无响应视图设 8s 超时上限；兼容 AppKit/SwiftUI、Electron、Chromium、WebKit 及 QtWebEngine）、后台零焦点 `AXPress`、针对无原生 `AXPress` 控件（如 Qt6/Anki）的遮挡校验坐标兜底、`postToPid` 后台按键及密码框自动脱敏（`[REDACTED_PASSWORD]`）。
+   - 提供 47 个标准工具（`list_apps`、`list_windows`、`get_app_state`、`left_click`/`click`、`set_value`、`perform_action`、`open_application`/`launch_app`、`screenshot`、`request_access`、`stop_computer_control`、剪贴板读写及紧凑/增量状态压缩）。
 3. **可选旧版 ZCode 桥接器（`bridges/`）**
    - **默认模式（未安装 `ZCode.app` 或已升级至限制外部 `verifyPeer` 桥接的 `ZCode >= 3.18.0`）**：`zcode-cua` 自动指向内置纯开源原生 macOS AX MCP 服务端，开箱即用且不受第三方客户端升级影响。
    - **旧版 `ZCode < 3.18.0` 环境**：支持挂载 `zcode-cua-bridge.mjs` 与 `zcode-cua-visible-bridge.mjs`，同时保留 `cua-open` 开源后端备选。
@@ -30,8 +30,8 @@
 
 ### 环境要求
 - **macOS 13+**（Apple Silicon 或 Intel 均支持）
+- **Xcode Command Line Tools**（若未安装请先执行 `xcode-select --install`，提供编译原生 `macos-ax-helper` 所需的 `/usr/bin/swiftc` 以及安装后只读探针所需的 `python3` 3.9+）
 - **Node.js >= 20**（可通过 `node -v` 检查，若未安装可执行 `brew install node`）
-- **Python 3.9+**（macOS 系统自带，仅用于安装后运行只读握手自检）
 
 ### 一键安装命令
 

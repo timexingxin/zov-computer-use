@@ -7,19 +7,17 @@
 
 | Platform & Architecture | Automation Mechanism | Status | Zero Fake-Success Guarantee | Verification Evidence |
 | :--- | :--- | :---: | :--- | :--- |
-| **macOS (Apple Silicon arm64)** | Native AX, CoreGraphics, screencapture | **IMPLEMENTED**; TextEdit file workflow VERIFIED | Real TextEdit E2E is a separate gate | Local physical E2E passed for AX observation, typing, save, and clipboard; other native actions lack physical assertions. |
-| **macOS (Intel x64)** | Native AX, CoreGraphics, screencapture | **IMPLEMENTED** | Real OS events require a physical test | CI build and unit tests only; no physical Intel verification recorded. |
-| **Windows (x64)** | Windows UI Automation & PowerShell | **EXPERIMENTAL** | Unverified actions throw `UnsupportedPlatformError` | Type definitions and skeleton contracts. |
-| **Linux (X11 / Wayland)** | AT-SPI2 / Portal | **EXPERIMENTAL** | Unverified actions throw `UnsupportedPlatformError` | Type definitions and skeleton contracts. |
+| **macOS (Apple Silicon arm64)** | Native Swift `ApplicationServices` (AX), `CoreGraphics`, `screencapture` | **IMPLEMENTED**; core/CLI/TextEdit paths VERIFIED | Strict fail-closed taxonomy (`stale_handle`, `window_not_found`, `foreground_required`, `timeout`) | Automated unit/stdio/Swift CLI golden suite + local TextEdit GUI E2E. |
+| **macOS (Intel x64)** | Native Swift `ApplicationServices` (AX), `CoreGraphics`, `screencapture` | **IMPLEMENTED** | Same compiled Swift source (`xcode-select --install`) | CI build and unit/golden tests; physical Intel GUI E2E not separately recorded. |
+| **Windows (x64)** | Fail-closed skeleton (no PowerShell execution) | **EXPERIMENTAL SKELETON** | Every GUI/app tool throws `UnsupportedPlatformError` (`request_access` returns `{false, false}`) | Verified fail-closed in `red-team-adversarial.test.mjs` and `audit-regression.test.mjs`. |
+| **Linux (X11 / Wayland)** | Fail-closed skeleton | **EXPERIMENTAL SKELETON** | Every GUI/app tool throws `UnsupportedPlatformError` (`request_access` returns `{false, false}`) | Verified fail-closed on Ubuntu CI. |
 
-See [`docs/CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md) for the exhaustive tool-by-tool breakdown across all 41 tools.
+See [`docs/CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md) for the complete breakdown across all **47 tools**.
 
 ---
 
-## 2. macOS Permissions Onboarding
+## 2. macOS Build & Permission Prerequisites
 
-Running the full macOS GUI test requires two distinct user grants in **System Settings > Privacy & Security**:
-1. **Accessibility**: Allows reading UI element trees and dispatching semantic AX actions.
-2. **Screen Recording**: Allows capturing window and display screenshots via `screencapture`.
-
-Run `cua doctor` to check Accessibility and Screen Recording. `cua doctor --require-real-gui` exits nonzero if any required check fails. The Screen Recording preflight uses `/usr/bin/swift`, so a working Swift toolchain is needed for the strict check. The TextEdit E2E opens a dedicated temporary file through LaunchServices and checks its accessibility tree and saved bytes; it does not send Apple Events directly to TextEdit.
+1. **Xcode Command Line Tools** (`xcode-select --install`): Required during `./install.sh` / `npm run build` to compile `macos-ax-helper` via `/usr/bin/swiftc` and run `rpc_probe.py` via `python3`. At runtime, `cua doctor` and `request_access` execute the pre-compiled `macos-ax-helper permissions` binary directly (`AXIsProcessTrusted` + `CGPreflightScreenCaptureAccess`) without invoking `/usr/bin/swift` or Apple Events.
+2. **Accessibility Permission** (**System Settings > Privacy & Security > Accessibility**): Required to inspect application AX trees and dispatch actions.
+3. **Screen Recording Permission** (**System Settings > Privacy & Security > Screen Recording**): Required for window/display `screenshot` capture.

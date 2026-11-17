@@ -199,16 +199,23 @@ async function cleanup() {
   }
 
   if (procsToKill.length > 0) {
-    const killTimer = setTimeout(() => {
-      for (const p of procsToKill) {
-        if (!p.killed) {
-          try {
-            p.kill("SIGKILL");
-          } catch {}
-        }
+    await Promise.race([
+      Promise.all(
+        procsToKill.map((p) =>
+          p.exitCode !== null || p.signalCode !== null
+            ? Promise.resolve()
+            : new Promise((resolve) => p.once("exit", resolve))
+        )
+      ),
+      new Promise((resolve) => setTimeout(resolve, 600)),
+    ]);
+    for (const p of procsToKill) {
+      if (p.exitCode === null && p.signalCode === null) {
+        try {
+          p.kill("SIGKILL");
+        } catch {}
       }
-    }, 2000);
-    killTimer.unref();
+    }
   }
 
   try { rmSync(tokenFilePath, { force: true }); } catch {}

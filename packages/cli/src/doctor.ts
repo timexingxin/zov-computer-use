@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { type PlatformAdapter } from "@zcode-community/core";
 import { createPlatformAdapter, TOOLS_MANIFEST } from "@zcode-community/mcp-server";
 
 export interface DoctorReport {
@@ -24,6 +25,7 @@ export interface DoctorReport {
       screen_recording: boolean;
     };
     environment: {
+      native_ax_helper: boolean;
       gui_session: boolean;
       window_server: boolean;
       coregraphics_ready: boolean;
@@ -41,29 +43,39 @@ export interface DoctorReport {
   };
 }
 
-export async function runDoctor(): Promise<DoctorReport> {
-  const adapter = createPlatformAdapter();
-  const perms = await adapter.checkPermissions().catch(() => ({
-    accessibility: false,
-    screen_recording: false,
-  }));
+export async function runDoctor(customAdapter?: PlatformAdapter): Promise<DoctorReport> {
+  const adapter = customAdapter || createPlatformAdapter();
+  const isDarwin = adapter.platform === "darwin";
 
-  // Check GUI session, WindowServer, TextEdit, CoreGraphics
+  const helperPath = typeof (adapter as any).helperPath === "string" ? (adapter as any).helperPath : undefined;
+  const nativeAxHelperReady = isDarwin ? Boolean(helperPath && existsSync(helperPath)) : true;
+
+  const perms = nativeAxHelperReady
+    ? await adapter.checkPermissions().catch(() => ({
+        accessibility: false,
+        screen_recording: false,
+      }))
+    : { accessibility: false, screen_recording: false };
+
   let windowServerAlive = false;
   let guiSessionActive = false;
   let coregraphicsReady = false;
   let texteditAvailable = false;
 
-  if (process.platform === "darwin") {
+  if (process.platform === "darwin" && isDarwin) {
     try {
       const { execFileSync } = await import("node:child_process");
       try {
         execFileSync("pgrep", ["-x", "WindowServer"], { stdio: "ignore", timeout: 3000 });
         windowServerAlive = true;
-      } catch (_) {}
+      } catch {}
 
-      const screenInfo = await adapter.getScreenInfo?.().catch(() => null);
-      coregraphicsReady = Boolean(screenInfo && screenInfo.main_display.width > 0 && screenInfo.main_display.height > 0);
+      if (nativeAxHelperReady) {
+        const screenInfo = await adapter.getScreenInfo?.().catch(() => null);
+        coregraphicsReady = Boolean(
+          screenInfo && screenInfo.main_display.width > 0 && screenInfo.main_display.height > 0
+        );
+      }
       guiSessionActive =
         windowServerAlive &&
         coregraphicsReady &&
@@ -76,22 +88,18 @@ export async function runDoctor(): Promise<DoctorReport> {
         join(homedir(), "Applications/TextEdit.app"),
       ];
       texteditAvailable = textEditCandidates.some((p) => existsSync(p));
-    } catch (_) {}
+    } catch {}
   } else {
     guiSessionActive = !process.env.CI && !process.env.GITHUB_ACTIONS;
     coregraphicsReady = true;
   }
 
-  // Detect ZCode app & plugin directories safely
   let zcodeInstalled = false;
   let zcodeAppPath: string | undefined;
   const zcodeConfig = join(homedir(), ".zcode");
 
   if (process.platform === "darwin") {
-    const candidates = [
-      "/Applications/ZCode.app",
-      join(homedir(), "Applications/ZCode.app"),
-    ];
+    const candidates = ["/Applications/ZCode.app", join(homedir(), "Applications/ZCode.app")];
     for (const c of candidates) {
       if (existsSync(c)) {
         zcodeInstalled = true;
@@ -110,13 +118,13 @@ export async function runDoctor(): Promise<DoctorReport> {
   const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
   const runtimeValid = nodeMajor >= 20;
   const osSupported = ["darwin", "win32", "linux"].includes(process.platform);
-  const mcpValid = TOOLS_MANIFEST.length >= 25;
+  const mcpValid = TOOLS_MANIFEST.length >= 47;
 
-  const overallHealthy = runtimeValid && osSupported && mcpValid;
-  const coreReady = overallHealthy;
+  const coreReady = runtimeValid && osSupported && mcpValid && nativeAxHelperReady;
 
   const missingRealGui: string[] = [];
   if (process.platform !== "darwin") missingRealGui.push("darwin");
+  if (!nativeAxHelperReady) missingRealGui.push("native_ax_helper");
   if (!guiSessionActive) missingRealGui.push("interactive_gui");
   if (!windowServerAlive) missingRealGui.push("window_server");
   if (!perms.accessibility) missingRealGui.push("accessibility");
@@ -147,6 +155,7 @@ export async function runDoctor(): Promise<DoctorReport> {
         screen_recording: perms.screen_recording,
       },
       environment: {
+        native_ax_helper: nativeAxHelperReady,
         gui_session: guiSessionActive,
         window_server: windowServerAlive,
         coregraphics_ready: coregraphicsReady,

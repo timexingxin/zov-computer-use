@@ -15,16 +15,16 @@ flowchart TD
     end
 
     subgraph InterfaceLayer["Protocol & CLI Layer"]
-        MCP["packages/mcp-server<br/>(Serialized JSON-RPC 2.0 stdio)"]
+        MCP["packages/mcp-server<br/>(Serialized JSON-RPC 2.0 stdio + Runtime Schema Validation)"]
         CLI["packages/cli (cua)<br/>(Doctor, Diagnostics, CLI Runner)"]
         Plugin["skills/*<br/>(Orchestrator & Execution Skills)"]
     end
 
     subgraph CoreLayer["packages/core (Domain Engine)"]
         Reducer["State Reducer, Compressor & Secret Redactor<br/>(Compact / Diff / Full)"]
-        Handle["Stable Handle Engine<br/>(Role + ID + Name + Ancestor Hash)"]
+        Handle["Stable Handle Engine<br/>(Strong: ID+Name; Weak: Role+Subrole+Name+Ancestors)"]
         Batch["Batch Action Orchestrator<br/>(Fail-Fast & Step Recovery)"]
-        Errors["Error Taxonomy & Latch<br/>(StaleHandle, PermissionDenied, etc.)"]
+        Errors["Error Taxonomy & Latch<br/>(StaleHandle, Timeout, AmbiguousElement, etc.)"]
     end
 
     subgraph PlatformLayer["Platform Adapters"]
@@ -34,9 +34,9 @@ flowchart TD
     end
 
     subgraph OSLayer["Operating System Subsystems"]
-        OSX["macOS Application & Window Server"]
-        WINX["Windows Desktop & Shell"]
-        LINX["Linux Display Server"]
+        OSX["macOS Accessibility (HIServices) & CoreGraphics"]
+        WINX["Windows Stub (UnsupportedPlatformError)"]
+        LINX["Linux Stub (UnsupportedPlatformError)"]
     end
 
     AgentLayer -->|stdio JSON-RPC| MCP
@@ -54,16 +54,16 @@ flowchart TD
 ## 2. Core Subsystems
 
 ### A. Core Engine (`packages/core`)
-- **Stable Element Handles**: UI element indices (`index: 12`) fluctuate across dynamic app repaints. The stable handle engine computes content-addressable identifiers (`h_<role>_<hash>`) based on `window_id + role + name + accessibility_path`, ensuring commands target the correct control even after UI updates.
-- **State Compression & Token Efficiency**: Raw accessibility trees from complex applications can consume tens of thousands of tokens. The reducer provides `compact` mode (default, pruning non-interactive containers) and `diff` mode (only modified nodes since the last `state_id`).
-- **Error Taxonomy**: Distinct error classes (`PermissionDeniedError`, `ElementNotFoundError`, `StaleHandleError`, `WindowNotFoundError`, `TimeoutError`) enable intelligent agent self-recovery rather than generic failures.
+- **Stable Element Handles**: UI element indices (`index: 12`) fluctuate across dynamic repaints. Strong handles (`h_str_<role>_<hash>`) hash `window_id + role + identifier + name`; weak handles (`h_wk_<role>_<hash>`) hash `window_id + role + subrole + name + ancestor_role_chain` (deliberately omitting volatile `ax_path` sibling indices so handles survive sibling insertions while flagging collisions as `ambiguous: true`).
+- **State Compression & Secret Redaction**: Raw accessibility trees are sanitized on every observation and `return_state` path (`compact`, `diff`, and `full`) before serialization. `computeStateDiff` uses occurrence-indexed keys (`${handle}#${occurrence}`) so duplicate weak handles never mask deletions.
+- **Error Taxonomy & Delivery Truthfulness**: Distinct error classes (`PermissionDeniedError`, `ElementNotFoundError`, `StaleHandleError`, `WindowNotFoundError`, `InvalidArgumentError`, `TimeoutError`) expose `recoverable` and `action_sent` flags; mutating helper timeouts report `action_sent: true` to prevent blind replay of partially delivered GUI events.
 
 ### B. MCP Server (`packages/mcp-server`)
-- Pure, serialized newline-delimited JSON-RPC 2.0 implementation over `stdio` (zero network ports).
-- Exposes 45+ standardized Computer Use tools and legacy aliases with schema validation and bounded FIFO state caching.
-- Maintains strict stdio stream cleanliness: stdout is reserved solely for JSON-RPC messages; all diagnostic traces route to stderr.
+- Pure, serialized newline-delimited JSON-RPC 2.0 implementation over `stdio` (zero network ports, 2 MiB line framing cap, whitelisted MCP protocol version negotiation).
+- Exposes **47 standardized Computer Use tools** (39 primary tools + 8 aliases) with runtime schema validation (`required`, `enum`, `Number.isFinite`, integer/range bounds) and bounded 64-entry FIFO state caching.
+- Maintains strict stdio stream cleanliness: `stdout` carries exclusively JSON-RPC envelopes; diagnostics write to `stderr`.
 
 ### C. Platform Adapters
-- **macOS (`packages/platform-macos`)**: Compiled native Swift `ApplicationServices` + `CoreGraphics` + `AppKit` helper (`macos-ax-helper`), up-to-depth-20 AX tree capture, background zero-focus `AXPress`, occlusion-verified coordinate fallback, `postToPid` background keyboard delivery, and native `screencapture` integration.
-- **Windows (`packages/platform-windows`)**: Experimental skeleton throwing `UnsupportedPlatformError` (Zero Fake-Success).
-- **Linux (`packages/platform-linux`)**: Experimental skeleton throwing `UnsupportedPlatformError` (Zero Fake-Success).
+- **macOS (`packages/platform-macos`)**: Compiled native Swift `ApplicationServices` + `CoreGraphics` + `AppKit` helper (`macos-ax-helper`), weak `dlsym` lookup for `_AXUIElementGetWindow`, bounded 8s `inspect` deadline, background zero-focus `AXPress` with secondary TOCTOU role + identifier/name verification, occlusion-verified coordinate fallback (with AX hit-test disambiguation for click-through overlays), `postToPid` background keyboard delivery, and Retina `scale_factor` metadata on `screencapture`.
+- **Windows (`packages/platform-windows`)**: Pure fail-closed skeleton throwing `UnsupportedPlatformError` (zero PowerShell command execution, zero fake-success).
+- **Linux (`packages/platform-linux`)**: Pure fail-closed skeleton throwing `UnsupportedPlatformError` (zero fake-success).

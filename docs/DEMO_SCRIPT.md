@@ -19,7 +19,7 @@ Risk Level: **Zero** (no personal data, credentials, or network exposure).
    ```bash
    npm run doctor
    ```
-3. Highlight the green `[PASS]` marks verifying Node.js, macOS Accessibility, and 40 MCP tools registered.
+3. Highlight the green `[PASS]` marks verifying Node.js, Native AX Helper, macOS Accessibility, and 47 MCP tools registered.
 
 ### [0:10 - 0:25] App Discovery & Semantic Observation
 1. Launch Calculator in background:

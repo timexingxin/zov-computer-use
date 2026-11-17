@@ -73,8 +73,8 @@ export class AppNotFoundError extends ComputerUseError {
 }
 
 export class TimeoutError extends ComputerUseError {
-  constructor(action: string, timeoutMs: number) {
-    super(`Operation timed out after ${timeoutMs}ms: ${action}`, "timeout", true, false);
+  constructor(action: string, timeoutMs: number, actionSent = false) {
+    super(`Operation timed out after ${timeoutMs}ms: ${action}`, "timeout", true, actionSent);
     this.name = "TimeoutError";
   }
 }

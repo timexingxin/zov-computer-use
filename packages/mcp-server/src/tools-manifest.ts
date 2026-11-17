@@ -116,9 +116,13 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
           description: "Target element ({type: 'element', state_id, index or handle}) or coordinate ({type: 'coordinate', x, y})",
         },
         button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
-        clickCount: { type: "number", default: 1 },
+        clickCount: { type: "number", minimum: 1, maximum: 10, default: 1 },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
-        return_state: { type: "string", enum: ["compact"], description: "Optional atomic post-action state refresh." },
+        return_state: {
+          type: "string",
+          enum: ["compact", "full", "none"],
+          description: "Optional atomic post-action state refresh.",
+        },
       },
       required: ["target"],
     },
@@ -131,8 +135,8 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       properties: {
         target: { type: "object" },
         app_ref: { type: "object" },
-        modifiers: { type: "string" },
-        clickCount: { type: "number", default: 1 },
+        modifiers: { description: "Optional modifier chord string (e.g. 'cmd+shift') or array of modifier names" },
+        clickCount: { type: "number", minimum: 1, maximum: 10, default: 1 },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
         return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
@@ -209,14 +213,15 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "scroll",
-    description: "Scroll the view vertically or horizontally.",
+    description: "Scroll the view vertically or horizontally at the current pointer or optional target.",
     inputSchema: {
       type: "object",
       properties: {
         deltaY: { type: "number", description: "Vertical scroll amount (positive down, negative up)" },
         deltaX: { type: "number", description: "Horizontal scroll amount" },
+        delta: { type: "number", description: "Legacy shorthand for vertical scroll deltaY" },
         direction: { type: "string", enum: ["up", "down", "left", "right"] },
-        target: { type: "object" },
+        target: { type: "object", description: "Optional element or coordinate target to move over before scrolling" },
       },
     },
   },
@@ -275,13 +280,16 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   // --- Text & Keyboard ---
   {
     name: "type_text",
-    description: "Type a text string into the active element or target element.",
+    description: "Type a text string into the active element or editable target element.",
     inputSchema: {
       type: "object",
       properties: {
         text: { type: "string" },
         target: { type: "object" },
+        app_ref: { type: "object" },
         clearFirst: { type: "boolean", default: false },
+        strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["text"],
     },
@@ -295,6 +303,7 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
         text: { type: "string" },
         target: { type: "object" },
         app_ref: { type: "object" },
+        clearFirst: { type: "boolean", default: false },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
         return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
@@ -310,7 +319,7 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
         key: { type: "string" },
         text: { type: "string" },
         app_ref: { type: "object" },
-        repeat: { type: "number" },
+        repeat: { type: "number", minimum: 0, maximum: 100 },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
         return_state: { type: "string", enum: ["compact", "full", "none"] },
         modifiers: {
@@ -330,7 +339,7 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
         text: { type: "string" },
         key: { type: "string" },
         app_ref: { type: "object" },
-        repeat: { type: "number" },
+        repeat: { type: "number", minimum: 0, maximum: 100 },
         strategy: { type: "string", enum: ["auto", "a11y", "event"], default: "auto" },
         return_state: { type: "string", enum: ["compact", "full", "none"] },
         modifiers: { type: "array", items: { type: "string" } },
@@ -372,7 +381,8 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
       properties: {
         target: { type: "object", description: "Target element ({type: 'element', state_id, index or handle})" },
         value: { type: "string" },
-        return_state: { type: "string", enum: ["compact"] },
+        app_ref: { type: "object" },
+        return_state: { type: "string", enum: ["compact", "full", "none"] },
       },
       required: ["target", "value"],
     },
@@ -517,12 +527,13 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "set_element_value",
-    description: "Convenience tool to find an editable element by name and set its text value.",
+    description: "Convenience tool to find an editable element by name (and optional role) and set its text value.",
     inputSchema: {
       type: "object",
       properties: {
         app_ref: { type: "object" },
         name: { type: "string" },
+        role: { type: "string" },
         value: { type: "string" },
       },
       required: ["app_ref", "name", "value"],
@@ -544,7 +555,7 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   // --- Safety & Control ---
   {
     name: "request_access",
-    description: "Check desktop automation permissions (Accessibility and Screen Recording) and request onboarding if denied.",
+    description: "Check desktop automation permissions (Accessibility and Screen Recording) in strictly read-only mode without opening System Settings.",
     inputSchema: {
       type: "object",
       properties: {
@@ -557,7 +568,7 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "stop_computer_control",
-    description: "Emergency kill switch: immediately ceases active automated control sessions.",
+    description: "Emergency kill switch: halts all subsequent session calls (except get_capabilities/wait/stop_computer_control) and releases tracked held inputs.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -565,11 +576,11 @@ export const TOOLS_MANIFEST: ToolDefinition[] = [
   },
   {
     name: "wait",
-    description: "Pause execution for a specified duration in milliseconds.",
+    description: "Pause execution for a specified duration in milliseconds (0..30000).",
     inputSchema: {
       type: "object",
       properties: {
-        ms: { type: "number", default: 1000 },
+        ms: { type: "number", minimum: 0, maximum: 30000, default: 1000 },
       },
     },
   },

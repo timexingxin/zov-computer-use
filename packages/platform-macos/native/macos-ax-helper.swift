@@ -1,11 +1,25 @@
 import ApplicationServices
 import Cocoa
 import CoreGraphics
+import Darwin
 import Foundation
 
-// Private but stable macOS HIServices symbol to map AXUIElement window -> CGWindowID.
-@_silgen_name("_AXUIElementGetWindow")
-func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+// Weak runtime lookup for _AXUIElementGetWindow so future macOS changes never cause a dyld launch failure.
+typealias AXGetWindowFn = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+let axGetWindowSymbol: AXGetWindowFn? = {
+    let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)
+    guard let sym = dlsym(rtldDefault, "_AXUIElementGetWindow") else { return nil }
+    return unsafeBitCast(sym, to: AXGetWindowFn.self)
+}()
+
+func getAXWindowID(_ element: AXUIElement) -> Int? {
+    guard let fn = axGetWindowSymbol else { return nil }
+    var wid: CGWindowID = 0
+    if fn(element, &wid) == .success, wid != 0 {
+        return Int(wid)
+    }
+    return nil
+}
 
 struct RectOut: Codable {
     let x: Int
@@ -55,16 +69,6 @@ struct InspectOut: Codable {
     let elements: [ElementOut]
 }
 
-func emitJSON<T: Encodable>(_ value: T) -> Never {
-    let encoder = JSONEncoder()
-    if let data = try? encoder.encode(value), let str = String(data: data, encoding: .utf8) {
-        FileHandle.standardOutput.write((str + "\n").data(using: .utf8)!)
-    } else {
-        FileHandle.standardOutput.write("{}\n".data(using: .utf8)!)
-    }
-    exit(0)
-}
-
 func failJSON(_ message: String, code: String = "operation_failed", extra: [String: Any] = [:]) -> Never {
     var payload: [String: Any] = [
         "ok": false,
@@ -79,17 +83,33 @@ func failJSON(_ message: String, code: String = "operation_failed", extra: [Stri
     exit(1)
 }
 
+func emitJSON<T: Encodable>(_ value: T) -> Never {
+    let encoder = JSONEncoder()
+    guard let data = try? encoder.encode(value), let str = String(data: data, encoding: .utf8) else {
+        failJSON("Failed to serialize JSON response", code: "operation_failed")
+    }
+    FileHandle.standardOutput.write((str + "\n").data(using: .utf8)!)
+    exit(0)
+}
+
+func emitDict(_ dict: [String: Any]) -> Never {
+    guard JSONSerialization.isValidJSONObject(dict),
+          let data = try? JSONSerialization.data(withJSONObject: dict)
+    else {
+        failJSON("Failed to serialize JSON dictionary", code: "operation_failed")
+    }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+    exit(0)
+}
+
 func strAttr(_ el: AXUIElement, _ attr: String) -> String? {
     var ref: CFTypeRef?
     guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success, let val = ref else {
         return nil
     }
-    if let s = val as? String {
-        return s
-    }
-    if let n = val as? NSNumber {
-        return n.stringValue
-    }
+    if let s = val as? String { return s }
+    if let n = val as? NSNumber { return n.stringValue }
     return nil
 }
 
@@ -121,6 +141,9 @@ func boundsAttr(_ el: AXUIElement) -> RectOut? {
     if !pt.x.isFinite || !pt.y.isFinite || !sz.width.isFinite || !sz.height.isFinite {
         return nil
     }
+    if abs(pt.x) > 200_000 || abs(pt.y) > 200_000 || abs(sz.width) > 200_000 || abs(sz.height) > 200_000 {
+        return nil
+    }
     return RectOut(
         x: Int(pt.x.rounded()),
         y: Int(pt.y.rounded()),
@@ -135,6 +158,66 @@ func actionNames(_ el: AXUIElement) -> [String] {
         return list
     }
     return []
+}
+
+let passwordKeywordRegex = try! NSRegularExpression(
+    pattern: "(\\b(password|passcode|passwd|pin\\s*code)\\b|密码|口令)",
+    options: [.caseInsensitive]
+)
+
+func isPasswordField(role: String, subrole: String?, name: String, desc: String, identifier: String?) -> Bool {
+    if role == "securetextfield" || subrole == "securetextfield" {
+        return true
+    }
+    if ["textfield", "textarea", "combobox", "searchfield"].contains(role) {
+        let combined = "\(name) \(desc) \(identifier ?? "")"
+        let range = NSRange(combined.startIndex..<combined.endIndex, in: combined)
+        if passwordKeywordRegex.firstMatch(in: combined, options: [], range: range) != nil {
+            return true
+        }
+    }
+    return false
+}
+
+func synthesizeElementName(el: AXUIElement, role: String, subrole: String?, precomputedChildTexts: [String]? = nil) -> String {
+    let title = (strAttr(el, kAXTitleAttribute as String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    if !title.isEmpty { return title }
+
+    let val = strAttr(el, kAXValueAttribute as String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if (role == "statictext" || role == "heading"), !val.isEmpty {
+        return val
+    }
+
+    if ["button", "link", "menuitem", "tab", "checkbox", "radiobutton"].contains(role) {
+        let childTexts: [String]
+        if let pre = precomputedChildTexts {
+            childTexts = pre
+        } else {
+            var collected: [String] = []
+            var chRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &chRef) == .success,
+               let chList = chRef as? [AXUIElement] {
+                for c in chList {
+                    let cRole = (strAttr(c, kAXRoleAttribute as String) ?? "").replacingOccurrences(of: "^AX", with: "", options: .regularExpression).lowercased()
+                    if cRole == "statictext" {
+                        let ct = (strAttr(c, kAXTitleAttribute as String) ?? strAttr(c, kAXValueAttribute as String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !ct.isEmpty { collected.append(ct) }
+                    }
+                }
+            }
+            childTexts = collected
+        }
+        let joined = childTexts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !joined.isEmpty { return joined }
+
+        let desc = (strAttr(el, kAXDescriptionAttribute as String) ?? strAttr(el, kAXHelpAttribute as String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !desc.isEmpty { return desc }
+
+        if subrole == "closebutton" { return "Close" }
+        if subrole == "minimizebutton" { return "Minimize" }
+        if subrole == "fullscreenbutton" || subrole == "zoombutton" { return "Zoom" }
+    }
+    return ""
 }
 
 func listRegularApps() -> [AppOut] {
@@ -184,7 +267,9 @@ func listCGWindows(filterPid: Int32? = nil) -> [WindowOut] {
             let y = (b["Y"] as? NSNumber)?.doubleValue ?? 0
             let w = (b["Width"] as? NSNumber)?.doubleValue ?? 0
             let h = (b["Height"] as? NSNumber)?.doubleValue ?? 0
-            rect = RectOut(x: Int(x.rounded()), y: Int(y.rounded()), width: Int(w.rounded()), height: Int(h.rounded()))
+            if x.isFinite && y.isFinite && w.isFinite && h.isFinite {
+                rect = RectOut(x: Int(x.rounded()), y: Int(y.rounded()), width: Int(w.rounded()), height: Int(h.rounded()))
+            }
         }
         if rect.width <= 10 || rect.height <= 10 { continue }
         let isFocused = !sawFrontWindow
@@ -209,9 +294,9 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
         failJSON("Application not found for pid \(pid)", code: "app_not_found")
     }
 
+    let deadline = CFAbsoluteTimeGetCurrent() + 8.0
     let axApp = AXUIElementCreateApplication(pid)
-    AXUIElementSetMessagingTimeout(axApp, 1.5)
-    // Enable web/Qt/Electron accessibility trees without changing focus
+    AXUIElementSetMessagingTimeout(axApp, 1.2)
     _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
 
@@ -225,7 +310,7 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
     var visitedCount = 0
 
     func walk(_ el: AXUIElement, depth: Int, path: [Int]) -> ElementOut? {
-        if depth > maxDepth || visitedCount >= maxNodes {
+        if depth > maxDepth || visitedCount >= maxNodes || CFAbsoluteTimeGetCurrent() > deadline {
             return nil
         }
         visitedCount += 1
@@ -235,11 +320,8 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
         let rawSubrole = strAttr(el, kAXSubroleAttribute as String)
         let subrole = rawSubrole?.replacingOccurrences(of: "^AX", with: "", options: .regularExpression).lowercased()
         let identifier = strAttr(el, kAXIdentifierAttribute as String) ?? strAttr(el, "AXDOMIdentifier")
-        let title = strAttr(el, kAXTitleAttribute as String) ?? ""
         let desc = strAttr(el, kAXDescriptionAttribute as String) ?? strAttr(el, kAXHelpAttribute as String) ?? ""
         let rawVal = strAttr(el, kAXValueAttribute as String)
-        let isSecureField = role == "securetextfield" || subrole == "securetextfield"
-        let val = isSecureField ? (rawVal != nil && !rawVal!.isEmpty ? "[REDACTED_PASSWORD]" : rawVal) : rawVal
 
         let bounds = boundsAttr(el)
         let enabled = boolAttr(el, kAXEnabledAttribute as String, default: true)
@@ -247,12 +329,12 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
         let acts = actionNames(el)
 
         var childrenOut: [ElementOut] = []
-        if depth < maxDepth && visitedCount < maxNodes {
+        if depth < maxDepth && visitedCount < maxNodes && CFAbsoluteTimeGetCurrent() <= deadline {
             var chRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &chRef) == .success,
                let chList = chRef as? [AXUIElement] {
                 for (idx, child) in chList.enumerated() {
-                    if visitedCount >= maxNodes { break }
+                    if visitedCount >= maxNodes || CFAbsoluteTimeGetCurrent() > deadline { break }
                     if let cNode = walk(child, depth: depth + 1, path: path + [idx]) {
                         childrenOut.append(cNode)
                     }
@@ -260,30 +342,10 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
             }
         }
 
-        // Synthesize human-readable semantic name cleanly across AppKit, WebKit, Chromium, and Qt6
-        var name = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if name.isEmpty, role == "statictext" || role == "heading", let v = val?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty {
-            name = v
-        }
-        if name.isEmpty, ["button", "link", "menuitem", "tab", "checkbox", "radiobutton"].contains(role) {
-            // Fall back to child statictext concatenation (common in web DOM buttons) or AXDescription
-            let childTexts = childrenOut
-                .filter { $0.role == "statictext" && !$0.name.isEmpty }
-                .map { $0.name }
-                .joined(separator: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !childTexts.isEmpty {
-                name = childTexts
-            } else if !desc.isEmpty {
-                name = desc
-            } else if subrole == "closebutton" {
-                name = "Close"
-            } else if subrole == "minimizebutton" {
-                name = "Minimize"
-            } else if subrole == "fullscreenbutton" || subrole == "zoombutton" {
-                name = "Zoom"
-            }
-        }
+        let childStaticTexts = childrenOut.filter { $0.role == "statictext" && !$0.name.isEmpty }.map { $0.name }
+        let name = synthesizeElementName(el: el, role: role, subrole: subrole, precomputedChildTexts: childStaticTexts)
+        let isSecure = isPasswordField(role: role, subrole: subrole, name: name, desc: desc, identifier: identifier)
+        let val = isSecure ? ((rawVal?.isEmpty == false) ? "[REDACTED_PASSWORD]" : rawVal) : rawVal
 
         var caps: [String] = []
         let hasNativePress = acts.contains("AXPress") || acts.contains("press")
@@ -301,7 +363,7 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
         if acts.contains("AXShowMenu") {
             caps.append("has_menu")
         }
-        if ["textfield", "textarea", "combobox", "searchfield"].contains(role) {
+        if ["textfield", "textarea", "combobox", "searchfield", "securetextfield"].contains(role) {
             caps.append("editable")
         }
         if ["checkbox", "radiobutton", "switch"].contains(role) {
@@ -329,8 +391,7 @@ func inspectApp(pid: Int32, windowId: Int?, maxDepth: Int, maxNodes: Int) -> Ins
     var roots: [ElementOut] = []
     for (wIdx, w) in axWindows.enumerated() {
         if let targetWid = windowId {
-            var cgWid: CGWindowID = 0
-            if _AXUIElementGetWindow(w, &cgWid) == .success, cgWid != 0, Int(cgWid) != targetWid {
+            if let cgWid = getAXWindowID(w), cgWid != targetWid {
                 continue
             }
         }
@@ -393,7 +454,7 @@ func topWindowAtPoint(x: Double, y: Double) -> (pid: Int32, owner: String, windo
         let by = (b["Y"] as? NSNumber)?.doubleValue ?? 0
         let bw = (b["Width"] as? NSNumber)?.doubleValue ?? 0
         let bh = (b["Height"] as? NSNumber)?.doubleValue ?? 0
-        if bw <= 10 || bh <= 10 { continue }
+        if bw <= 2 || bh <= 2 { continue }
         if x >= bx && x <= bx + bw && y >= by && y <= by + bh {
             let pid = (item[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0
             let owner = (item[kCGWindowOwnerName as String] as? String) ?? "Unknown"
@@ -402,6 +463,22 @@ func topWindowAtPoint(x: Double, y: Double) -> (pid: Int32, owner: String, windo
         }
     }
     return nil
+}
+
+func axHitTestMatchesPid(x: Double, y: Double, expectedPid: Int32) -> Bool {
+    let sysWide = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(sysWide, 0.4)
+    var hitEl: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(sysWide, Float(x), Float(y), &hitEl) == .success,
+          let elem = hitEl
+    else {
+        return false
+    }
+    var hitPid: pid_t = 0
+    if AXUIElementGetPid(elem, &hitPid) == .success {
+        return hitPid == expectedPid
+    }
+    return false
 }
 
 let KEY_CODES: [String: CGKeyCode] = [
@@ -441,26 +518,41 @@ func modifierFlags(from mods: [String]) -> CGEventFlags {
     return flags
 }
 
-// Parse CLI arguments
-let args = Array(CommandLine.arguments.dropFirst())
-guard let subcmd = args.first else {
+func parseCoord(_ raw: String?, name: String) -> Double {
+    guard let s = raw, let v = Double(s), v.isFinite, abs(v) <= 100_000 else {
+        failJSON("Invalid or non-finite coordinate for \(name): '\(raw ?? "")'", code: "invalid_argument")
+    }
+    return v
+}
+
+// Sequential CLI flag parser so values starting with "--" are never misidentified as flags.
+let rawArgs = Array(CommandLine.arguments.dropFirst())
+guard let subcmd = rawArgs.first else {
     failJSON("Missing subcommand", code: "invalid_argument")
 }
 
+var flagMap: [String: String] = [:]
+var idx = 1
+while idx < rawArgs.count {
+    let key = rawArgs[idx]
+    if key.hasPrefix("--"), idx + 1 < rawArgs.count {
+        flagMap[key] = rawArgs[idx + 1]
+        idx += 2
+    } else {
+        idx += 1
+    }
+}
+
 func argVal(_ flag: String) -> String? {
-    guard let idx = args.firstIndex(of: flag), idx + 1 < args.count else { return nil }
-    return args[idx + 1]
+    return flagMap[flag]
 }
 
 switch subcmd {
 case "permissions":
-    let ax = AXIsProcessTrusted()
-    let sr = CGPreflightScreenCaptureAccess()
-    let res: [String: Any] = ["accessibility": ax, "screen_recording": sr]
-    let data = try! JSONSerialization.data(withJSONObject: res)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict([
+        "accessibility": AXIsProcessTrusted(),
+        "screen_recording": CGPreflightScreenCaptureAccess(),
+    ])
 
 case "list-apps":
     emitJSON(listRegularApps())
@@ -470,16 +562,16 @@ case "list-windows":
     emitJSON(listCGWindows(filterPid: pid))
 
 case "inspect":
-    guard let pidStr = argVal("--pid"), let pid = Int32(pidStr) else {
-        failJSON("Missing --pid", code: "invalid_argument")
+    guard let pidStr = argVal("--pid"), let pid = Int32(pidStr), pid > 0 else {
+        failJSON("Missing or invalid --pid", code: "invalid_argument")
     }
     let wid = argVal("--window-id").flatMap { Int($0) }
-    let maxDepth = argVal("--max-depth").flatMap { Int($0) } ?? 20
-    let maxNodes = argVal("--max-nodes").flatMap { Int($0) } ?? 3000
+    let maxDepth = min(30, max(1, argVal("--max-depth").flatMap { Int($0) } ?? 20))
+    let maxNodes = min(10_000, max(50, argVal("--max-nodes").flatMap { Int($0) } ?? 3000))
     emitJSON(inspectApp(pid: pid, windowId: wid, maxDepth: maxDepth, maxNodes: maxNodes))
 
 case "act-element":
-    guard let pidStr = argVal("--pid"), let pid = Int32(pidStr),
+    guard let pidStr = argVal("--pid"), let pid = Int32(pidStr), pid > 0,
           let pathJson = argVal("--path"),
           let pathData = pathJson.data(using: .utf8),
           let path = try? JSONDecoder().decode([Int].self, from: pathData),
@@ -488,17 +580,34 @@ case "act-element":
         failJSON("Missing --pid, --path, or --action", code: "invalid_argument")
     }
     let expectedRole = argVal("--expected-role")?.lowercased()
+    let expectedIdent = argVal("--expected-identifier")
+    let expectedName = argVal("--expected-name")
+
     let axApp = AXUIElementCreateApplication(pid)
     AXUIElementSetMessagingTimeout(axApp, 2.0)
 
     guard let el = resolveByPath(axApp: axApp, path: path) else {
         failJSON("Element no longer exists at observed AX path; re-observe with get_app_state", code: "stale_handle")
     }
-    if let exp = expectedRole, !exp.isEmpty {
-        let actualRaw = strAttr(el, kAXRoleAttribute as String) ?? ""
-        let actual = actualRaw.replacingOccurrences(of: "^AX", with: "", options: .regularExpression).lowercased()
-        if actual != exp {
-            failJSON("Element role changed at AX path (expected \(exp), got \(actual)); re-observe state", code: "stale_handle")
+
+    let actualRawRole = strAttr(el, kAXRoleAttribute as String) ?? ""
+    let actualRole = actualRawRole.replacingOccurrences(of: "^AX", with: "", options: .regularExpression).lowercased()
+    let actualSubrole = strAttr(el, kAXSubroleAttribute as String)?.replacingOccurrences(of: "^AX", with: "", options: .regularExpression).lowercased()
+
+    if let exp = expectedRole, !exp.isEmpty, actualRole != exp {
+        failJSON("Element role changed at AX path (expected \(exp), got \(actualRole)); re-observe state", code: "stale_handle")
+    }
+
+    // Secondary TOCTOU identity check: prevent acting on shifted sibling controls
+    if let expId = expectedIdent, !expId.isEmpty {
+        let actualId = strAttr(el, kAXIdentifierAttribute as String) ?? strAttr(el, "AXDOMIdentifier") ?? ""
+        if actualId != expId {
+            failJSON("Element identifier changed at AX path (expected '\(expId)', got '\(actualId)'); re-observe state", code: "stale_handle")
+        }
+    } else if let expName = expectedName, !expName.isEmpty {
+        let actualName = synthesizeElementName(el: el, role: actualRole, subrole: actualSubrole)
+        if actualName != expName {
+            failJSON("Element label changed at AX path (expected '\(expName)', got '\(actualName)'); re-observe state", code: "stale_handle")
         }
     }
 
@@ -506,11 +615,7 @@ case "act-element":
         let value = argVal("--value") ?? ""
         let err = AXUIElementSetAttributeValue(el, kAXValueAttribute as CFString, value as CFTypeRef)
         if err == .success {
-            let out: [String: Any] = ["ok": true, "ax_error": 0]
-            let data = try! JSONSerialization.data(withJSONObject: out)
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-            exit(0)
+            emitDict(["ok": true, "ax_error": 0])
         } else {
             failJSON("AXUIElementSetAttributeValue failed with AXError \(err.rawValue)", code: "not_settable", extra: ["ax_error": err.rawValue])
         }
@@ -526,11 +631,7 @@ case "act-element":
         }
         let err = AXUIElementPerformAction(el, axAction as CFString)
         if err == .success {
-            let out: [String: Any] = ["ok": true, "ax_error": 0, "performed": axAction]
-            let data = try! JSONSerialization.data(withJSONObject: out)
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-            exit(0)
+            emitDict(["ok": true, "ax_error": 0, "performed": axAction])
         } else {
             failJSON(
                 "AX action '\(axAction)' returned AXError \(err.rawValue) (advertised actions: \(acts))",
@@ -541,25 +642,38 @@ case "act-element":
     }
 
 case "click-coord":
-    guard let xStr = argVal("--x"), let x = Double(xStr),
-          let yStr = argVal("--y"), let y = Double(yStr)
-    else {
-        failJSON("Missing --x or --y", code: "invalid_argument")
-    }
+    let x = parseCoord(argVal("--x"), name: "--x")
+    let y = parseCoord(argVal("--y"), name: "--y")
     let button = argVal("--button") ?? "left"
-    let count = argVal("--count").flatMap { Int64($0) } ?? 1
+    guard ["left", "right", "middle"].contains(button) else {
+        failJSON("Invalid mouse button: '\(button)'", code: "invalid_argument")
+    }
+    let count: Int64
+    if let cs = argVal("--count") {
+        guard let parsed = Int64(cs), parsed >= 1, parsed <= 10 else {
+            failJSON("clickCount must be an integer between 1 and 10", code: "invalid_argument")
+        }
+        count = parsed
+    } else {
+        count = 1
+    }
+
     let modsCsv = argVal("--modifiers") ?? ""
     let mods = modsCsv.isEmpty ? [] : modsCsv.split(separator: ",").map(String.init)
     let requirePid = argVal("--require-pid").flatMap { Int32($0) }
     let restoreCursor = argVal("--restore-cursor") == "1"
 
-    if let expectedPid = requirePid {
+    let allowOverlay = argVal("--allow-overlay") == "1"
+    if let expectedPid = requirePid, !allowOverlay {
         if let top = topWindowAtPoint(x: x, y: y), top.pid != expectedPid {
-            failJSON(
-                "Target point (\(Int(x)), \(Int(y))) is occluded by '\(top.owner)' (pid=\(top.pid), window_id=\(top.windowId)). Authorize focus_app / open_application(activate=true) or use background key(app_ref=...) instead.",
-                code: "foreground_required",
-                extra: ["covering_pid": top.pid, "covering_app": top.owner, "covering_window_id": top.windowId]
-            )
+            // Secondary AX hit-test disambiguates click-through transparent overlays (ignoresMouseEvents)
+            if !axHitTestMatchesPid(x: x, y: y, expectedPid: expectedPid) {
+                failJSON(
+                    "Target point (\(Int(x.rounded())), \(Int(y.rounded()))) is occluded by '\(top.owner)' (pid=\(top.pid), window_id=\(top.windowId)). Authorize focus_app / open_application(activate=true) or use background key(app_ref=...) instead.",
+                    code: "foreground_required",
+                    extra: ["covering_pid": top.pid, "covering_app": top.owner, "covering_window_id": top.windowId]
+                )
+            }
         }
     }
 
@@ -575,7 +689,7 @@ case "click-coord":
     }()
 
     let flags = modifierFlags(from: mods)
-    for clickIdx in 1...max(1, count) {
+    for clickIdx in 1...count {
         if let down = CGEvent(mouseEventSource: src, mouseType: downType, mouseCursorPosition: pt, mouseButton: cgBtn),
            let up = CGEvent(mouseEventSource: src, mouseType: upType, mouseCursorPosition: pt, mouseButton: cgBtn) {
             if !flags.isEmpty {
@@ -598,11 +712,7 @@ case "click-coord":
         }
     }
 
-    let out: [String: Any] = ["ok": true, "x": Int(x.rounded()), "y": Int(y.rounded())]
-    let data = try! JSONSerialization.data(withJSONObject: out)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict(["ok": true, "x": Int(x.rounded()), "y": Int(y.rounded())])
 
 case "key":
     guard let rawKey = argVal("--key"), !rawKey.isEmpty else {
@@ -612,27 +722,67 @@ case "key":
     var mods = modsCsv.isEmpty ? [] : modsCsv.split(separator: ",").map(String.init)
     var mainKey = rawKey
 
-    // Support chord syntax such as "cmd+s", "ctrl+shift+tab"
-    if rawKey.contains("+") && rawKey.count > 1 {
-        let parts = rawKey.split(separator: "+").map(String.init)
-        if let last = parts.last {
+    // Parse chord syntax safely (including "cmd++" -> cmd & "+", while rejecting "cmd+" or "+a")
+    if rawKey != "+" && rawKey.contains("+") {
+        if rawKey.hasSuffix("++") {
+            let prefix = String(rawKey.dropLast(2))
+            if prefix.isEmpty {
+                failJSON("Malformed key chord: '\(rawKey)'", code: "invalid_argument")
+            }
+            let modParts = prefix.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
+            if modParts.contains(where: { $0.isEmpty }) {
+                failJSON("Malformed key chord: '\(rawKey)'", code: "invalid_argument")
+            }
+            mods.append(contentsOf: modParts)
+            mainKey = "+"
+        } else {
+            let parts = rawKey.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
+            if parts.contains(where: { $0.isEmpty }) || parts.count < 2 {
+                failJSON("Malformed key chord: '\(rawKey)'", code: "invalid_argument")
+            }
             mods.append(contentsOf: parts.dropLast())
-            mainKey = last
+            mainKey = parts.last!
         }
     }
 
     let lower = mainKey.lowercased()
+    let hasCmdOrCtrl = mods.contains {
+        ["cmd", "command", "meta", "super", "ctrl", "control"].contains($0.lowercased().trimmingCharacters(in: .whitespaces))
+    }
+
     if ["!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "+", "{", "}", "|", ":", "\"", "<", ">", "?", "~"].contains(mainKey) {
         if !mods.contains(where: { $0.lowercased() == "shift" }) {
             mods.append("shift")
         }
-    } else if mainKey.count == 1, mainKey != lower, mainKey.uppercased() == mainKey {
+    } else if !hasCmdOrCtrl, mainKey.count == 1, mainKey != lower, mainKey.uppercased() == mainKey {
+        // Only auto-add shift for standalone uppercase letters, never for cmd+G / ctrl+C shortcuts
         if !mods.contains(where: { $0.lowercased() == "shift" }) {
             mods.append("shift")
         }
     }
 
-    let repeatCount = min(100, max(1, argVal("--repeat").flatMap { Int($0) } ?? 1))
+    let repeatCount: Int
+    if let rs = argVal("--repeat") {
+        guard let parsed = Int(rs), parsed >= 1, parsed <= 100 else {
+            failJSON("repeat must be an integer between 1 and 100", code: "invalid_argument")
+        }
+        repeatCount = parsed
+    } else {
+        repeatCount = 1
+    }
+
+    let normalizedMods = mods.map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+    if argVal("--dry-run") == "1" {
+        emitDict([
+            "ok": true,
+            "dry_run": true,
+            "key": lower,
+            "key_code": KEY_CODES[lower].map { Int($0) } as Any,
+            "modifiers": normalizedMods,
+            "repeat": repeatCount,
+        ])
+    }
+
     let targetPid = argVal("--pid").flatMap { Int32($0) }
     let flags = modifierFlags(from: mods)
     let src = CGEventSource(stateID: .privateState)
@@ -660,7 +810,6 @@ case "key":
             if repeatCount > 1 { usleep(15_000) }
         }
     } else {
-        // Unicode character fallback via keyboardSetUnicodeString
         let utf16 = Array(mainKey.utf16)
         for _ in 0..<repeatCount {
             guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
@@ -686,21 +835,18 @@ case "key":
         }
     }
 
-    let out: [String: Any] = ["ok": true, "key": mainKey, "scoped_pid": targetPid as Any]
-    let data = try! JSONSerialization.data(withJSONObject: out)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict(["ok": true, "key": lower, "scoped_pid": targetPid as Any])
 
 case "type-unicode":
-    guard let text = argVal("--text") else {
+    guard let rawText = argVal("--text") else {
         failJSON("Missing --text", code: "invalid_argument")
     }
+    let text = rawText.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     let targetPid = argVal("--pid").flatMap { Int32($0) }
     let src = CGEventSource(stateID: .privateState)
     for scalar in text {
         let s = String(scalar)
-        if s == "\n" || s == "\r" {
+        if s == "\n" {
             if let down = CGEvent(keyboardEventSource: src, virtualKey: 36, keyDown: true),
                let up = CGEvent(keyboardEventSource: src, virtualKey: 36, keyDown: false) {
                 if let pid = targetPid {
@@ -729,60 +875,77 @@ case "type-unicode":
         }
         usleep(4_000)
     }
-    let out: [String: Any] = ["ok": true, "length": text.count, "scoped_pid": targetPid as Any]
-    let data = try! JSONSerialization.data(withJSONObject: out)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict(["ok": true, "length": text.count, "scoped_pid": targetPid as Any])
 
 case "screen-info":
     let mainDisp = CGMainDisplayID()
     let w = CGDisplayPixelsWide(mainDisp)
     let h = CGDisplayPixelsHigh(mainDisp)
-    let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+    let matchingScreen = NSScreen.screens.first { scr in
+        (scr.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == mainDisp
+    } ?? NSScreen.main
+    let scale = Double(matchingScreen?.backingScaleFactor ?? 2.0)
+    let primaryHeight: CGFloat = NSScreen.screens.first?.frame.height ?? CGFloat(h)
+
+    let displaysDetail: [[String: Any]] = NSScreen.screens.map { scr in
+        let did = (scr.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        let f = scr.frame
+        // Convert AppKit bottom-left origin to Quartz global top-left point space
+        let qY = primaryHeight - (f.origin.y + f.size.height)
+        let s = Double(scr.backingScaleFactor)
+        return [
+            "id": Int(did),
+            "is_main": did == mainDisp,
+            "bounds": [
+                "x": Int(f.origin.x.rounded()),
+                "y": Int(qY.rounded()),
+                "width": Int(f.size.width.rounded()),
+                "height": Int(f.size.height.rounded()),
+            ],
+            "scale": s,
+        ]
+    }
+
     var dispCount: UInt32 = 0
-    var activeDisps = [CGDirectDisplayID](repeating: 0, count: 16)
-    CGGetActiveDisplayList(16, &activeDisps, &dispCount)
-    let out: [String: Any] = [
+    CGGetActiveDisplayList(0, nil, &dispCount)
+    emitDict([
         "displays": max(1, Int(dispCount)),
-        "main_display": ["width": w, "height": h, "scale": scale],
+        "main_display": [
+            "width": w,
+            "height": h,
+            "scale": scale,
+            "pixel_width": Int((Double(w) * scale).rounded()),
+            "pixel_height": Int((Double(h) * scale).rounded()),
+        ],
+        "displays_detail": displaysDetail,
         "platform": "darwin",
-    ]
-    let data = try! JSONSerialization.data(withJSONObject: out)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    ])
 
 case "focus-app":
     guard let pidStr = argVal("--pid"), let pid = Int32(pidStr),
           let rApp = NSRunningApplication(processIdentifier: pid)
     else {
-        let out: [String: Any] = ["ok": false]
-        FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
-        FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-        exit(0)
+        emitDict(["ok": false])
     }
     let ok = rApp.activate()
-    let out: [String: Any] = ["ok": ok]
-    FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict(["ok": ok])
 
 case "window-op":
     guard let op = argVal("--op"),
-          let widStr = argVal("--window-id"), let targetWid = Int(widStr)
+          let widStr = argVal("--window-id"), let targetWid = Int(widStr), targetWid > 0
     else {
-        failJSON("Missing --op or --window-id", code: "invalid_argument")
+        failJSON("Valid positive --window-id and --op are required", code: "window_not_found")
     }
 
     var candidatePids: [Int32] = []
-    if let pStr = argVal("--pid"), let p = Int32(pStr) {
+    if let pStr = argVal("--pid"), let p = Int32(pStr), p > 0 {
         candidatePids.append(p)
     }
     if let cgMatch = listCGWindows().first(where: { $0.id == targetWid }), !candidatePids.contains(cgMatch.pid) {
         candidatePids.append(cgMatch.pid)
     }
     if candidatePids.isEmpty {
+        // Also search regular apps for minimized windows, strictly matching exact CGWindowID only
         candidatePids = listRegularApps().map { $0.pid }
     }
 
@@ -795,26 +958,17 @@ case "window-op":
         if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winsRef) == .success,
            let wins = winsRef as? [AXUIElement] {
             for w in wins {
-                var cgWid: CGWindowID = 0
-                if _AXUIElementGetWindow(w, &cgWid) == .success, Int(cgWid) == targetWid {
+                if getAXWindowID(w) == targetWid {
                     foundWin = w
                     foundPid = pid
                     break outerLoop
                 }
             }
-            if targetWid == 0, let first = wins.first {
-                foundWin = first
-                foundPid = pid
-                break outerLoop
-            }
         }
     }
 
     guard let winEl = foundWin else {
-        let out: [String: Any] = ["ok": false]
-        FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
-        FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-        exit(0)
+        failJSON("Window not found: \(targetWid)", code: "window_not_found")
     }
 
     var success = false
@@ -823,36 +977,45 @@ case "window-op":
         _ = NSRunningApplication(processIdentifier: foundPid)?.activate()
         success = AXUIElementPerformAction(winEl, kAXRaiseAction as CFString) == .success
     case "move":
-        if let xs = argVal("--x"), let x = Double(xs), let ys = argVal("--y"), let y = Double(ys) {
-            var pt = CGPoint(x: x, y: y)
-            if let axVal = AXValueCreate(.cgPoint, &pt) {
-                success = AXUIElementSetAttributeValue(winEl, kAXPositionAttribute as CFString, axVal) == .success
-            }
+        let x = parseCoord(argVal("--x"), name: "--x")
+        let y = parseCoord(argVal("--y"), name: "--y")
+        var pt = CGPoint(x: x, y: y)
+        if let axVal = AXValueCreate(.cgPoint, &pt) {
+            success = AXUIElementSetAttributeValue(winEl, kAXPositionAttribute as CFString, axVal) == .success
         }
     case "resize":
-        if let ws = argVal("--width"), let w = Double(ws), let hs = argVal("--height"), let h = Double(hs) {
-            var sz = CGSize(width: w, height: h)
-            if let axVal = AXValueCreate(.cgSize, &sz) {
-                success = AXUIElementSetAttributeValue(winEl, kAXSizeAttribute as CFString, axVal) == .success
-            }
+        let w = parseCoord(argVal("--width"), name: "--width")
+        let h = parseCoord(argVal("--height"), name: "--height")
+        guard w > 10 && h > 10 else {
+            failJSON("Window width and height must be > 10", code: "invalid_argument")
+        }
+        var sz = CGSize(width: w, height: h)
+        if let axVal = AXValueCreate(.cgSize, &sz) {
+            success = AXUIElementSetAttributeValue(winEl, kAXSizeAttribute as CFString, axVal) == .success
         }
     case "minimize":
         success = AXUIElementSetAttributeValue(winEl, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success
     case "maximize":
-        var btnRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(winEl, kAXZoomButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
-            success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
-        } else if AXUIElementCopyAttributeValue(winEl, kAXFullScreenButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
-            success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
+        if boolAttr(winEl, "AXFullScreen", default: false) {
+            success = true
+        } else if let curBounds = boundsAttr(winEl),
+                  let vis = NSScreen.main?.visibleFrame,
+                  abs(Double(curBounds.width) - Double(vis.width)) <= 4 && abs(Double(curBounds.height) - Double(vis.height)) <= 4 {
+            // Already zoomed to visible screen frame; keep idempotent instead of toggling back down
+            success = true
+        } else {
+            var btnRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(winEl, kAXZoomButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
+                success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
+            } else if AXUIElementCopyAttributeValue(winEl, kAXFullScreenButtonAttribute as CFString, &btnRef) == .success, let btn = btnRef {
+                success = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString) == .success
+            }
         }
     default:
         failJSON("Unknown window op: \(op)", code: "invalid_argument")
     }
 
-    let out: [String: Any] = ["ok": success]
-    FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict(["ok": success])
 
 case "pointer-op":
     guard let op = argVal("--op") else {
@@ -861,6 +1024,9 @@ case "pointer-op":
     let src = CGEventSource(stateID: .hidSystemState)
     let curPos = CGEvent(source: nil)?.location ?? .zero
     let button = argVal("--button") ?? "left"
+    guard ["left", "right", "middle"].contains(button) else {
+        failJSON("Invalid button: '\(button)'", code: "invalid_argument")
+    }
     let (downType, upType, dragType, cgBtn): (CGEventType, CGEventType, CGEventType, CGMouseButton) = {
         switch button {
         case "right": return (.rightMouseDown, .rightMouseUp, .rightMouseDragged, .right)
@@ -871,9 +1037,8 @@ case "pointer-op":
 
     switch op {
     case "move":
-        guard let xs = argVal("--x"), let x = Double(xs), let ys = argVal("--y"), let y = Double(ys) else {
-            failJSON("Missing --x or --y", code: "invalid_argument")
-        }
+        let x = parseCoord(argVal("--x"), name: "--x")
+        let y = parseCoord(argVal("--y"), name: "--y")
         if let ev = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left) {
             ev.post(tap: .cghidEventTap)
         }
@@ -886,11 +1051,12 @@ case "pointer-op":
             ev.post(tap: .cghidEventTap)
         }
     case "drag":
-        guard let txs = argVal("--to-x"), let tx = Double(txs), let tys = argVal("--to-y"), let ty = Double(tys) else {
-            failJSON("Missing --to-x or --to-y", code: "invalid_argument")
-        }
+        let tx = parseCoord(argVal("--to-x"), name: "--to-x")
+        let ty = parseCoord(argVal("--to-y"), name: "--to-y")
         let startPt: CGPoint = {
-            if let fxs = argVal("--from-x"), let fx = Double(fxs), let fys = argVal("--from-y"), let fy = Double(fys) {
+            if argVal("--from-x") != nil || argVal("--from-y") != nil {
+                let fx = parseCoord(argVal("--from-x"), name: "--from-x")
+                let fy = parseCoord(argVal("--from-y"), name: "--from-y")
                 return CGPoint(x: fx, y: fy)
             }
             return curPos
@@ -900,9 +1066,9 @@ case "pointer-op":
             mv.post(tap: .cghidEventTap)
             usleep(10_000)
         }
-        if let dn = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: startPt, mouseButton: .left),
-           let dr = CGEvent(mouseEventSource: src, mouseType: dragType, mouseCursorPosition: endPt, mouseButton: .left),
-           let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: endPt, mouseButton: .left) {
+        if let dn = CGEvent(mouseEventSource: src, mouseType: downType, mouseCursorPosition: startPt, mouseButton: cgBtn),
+           let dr = CGEvent(mouseEventSource: src, mouseType: dragType, mouseCursorPosition: endPt, mouseButton: cgBtn),
+           let up = CGEvent(mouseEventSource: src, mouseType: upType, mouseCursorPosition: endPt, mouseButton: cgBtn) {
             dn.post(tap: .cghidEventTap)
             usleep(15_000)
             dr.post(tap: .cghidEventTap)
@@ -910,8 +1076,10 @@ case "pointer-op":
             up.post(tap: .cghidEventTap)
         }
     case "scroll":
-        let dy = Int32(argVal("--delta-y").flatMap { Int($0) } ?? 0)
-        let dx = Int32(argVal("--delta-x").flatMap { Int($0) } ?? 0)
+        let dyRaw = parseCoord(argVal("--delta-y") ?? "0", name: "--delta-y")
+        let dxRaw = parseCoord(argVal("--delta-x") ?? "0", name: "--delta-x")
+        let dy = Int32(dyRaw.rounded())
+        let dx = Int32(dxRaw.rounded())
         if let ev = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
             ev.post(tap: .cghidEventTap)
         }
@@ -919,10 +1087,7 @@ case "pointer-op":
         failJSON("Unknown pointer op: \(op)", code: "invalid_argument")
     }
 
-    let out: [String: Any] = ["ok": true]
-    FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
-    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
-    exit(0)
+    emitDict(["ok": true])
 
 default:
     failJSON("Unknown subcommand: \(subcmd)", code: "invalid_argument")

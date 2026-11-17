@@ -4,13 +4,13 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.2.x   | :white_check_mark: |
 
 ---
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in `zcode-desktop-control`, please do **not** open a public issue.
+If you discover a security vulnerability in `macos-computer-use-kit`, please do **not** open a public issue.
 
 Instead, please submit a report privately via GitHub Private Vulnerability Reporting or contact the maintainers directly.
 

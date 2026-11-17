@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -24,61 +24,224 @@ import {
   AppNotFoundError,
   ComputerUseError,
   ElementNotFoundError,
+  InvalidArgumentError,
+  PermissionDeniedError,
   StaleHandleError,
+  TimeoutError,
+  WindowNotFoundError,
   assignHandlesToTree,
   resolveElementWithAmbiguity,
 } from "@zcode-community/core";
 
 const execFile = promisify(execFileCallback);
 const MAX_RETAINED_STATES = 64;
+const EDITABLE_ROLES = new Set([
+  "textfield",
+  "textarea",
+  "combobox",
+  "searchfield",
+  "securetextfield",
+]);
 
 function resolveNativeHelperPath(): string {
   const distDir = dirname(fileURLToPath(import.meta.url));
   return join(distDir, "bin", "macos-ax-helper");
 }
 
+function assertFiniteCoord(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 100_000) {
+    throw new InvalidArgumentError(`${label} must be a finite number within [-100000, 100000]`);
+  }
+  return value;
+}
+
+function isEditableElement(elem: UIElement): boolean {
+  return (
+    elem.capabilities.includes("editable") ||
+    EDITABLE_ROLES.has((elem.role || "").toLowerCase())
+  );
+}
+
 export class MacOSAdapter implements PlatformAdapter {
   readonly platform = "darwin" as const;
   readonly status = "verified" as const;
 
-  private activeStates = new Map<string, { appRef: AppRef; tree: UIElement[] }>();
-  private helperPath = resolveNativeHelperPath();
+  /** @internal */
+  public activeStates = new Map<string, { appRef: AppRef; tree: UIElement[] }>();
+  /** @internal */
+  public helperPath = resolveNativeHelperPath();
 
-  private async runHelper<T>(args: string[], timeoutMs = 15000): Promise<T> {
+  private heldMouseButtons = new Set<"left" | "right" | "middle">();
+  private activeChildPids = new Set<number>();
+  private activeTempFiles = new Set<string>();
+
+  /** @internal */
+  public async runHelper<T>(args: string[], timeoutMs = 15000, isMutating = false): Promise<T> {
     if (!existsSync(this.helperPath)) {
       throw new ComputerUseError(
-        `Native macOS AX helper binary not found at ${this.helperPath}. Run 'npm run build' on macOS first.`,
-        "operation_failed"
+        `Native macOS AX helper binary not found at ${this.helperPath}. Run 'npm run build' on macOS with Xcode Command Line Tools installed.`,
+        "operation_failed",
+        false,
+        false
       );
     }
 
-    try {
-      const { stdout } = await execFile(this.helperPath, args, {
-        timeout: timeoutMs,
-        maxBuffer: 16 * 1024 * 1024,
+    const actionLabel = args[0] || "helper";
+
+    return new Promise<T>((resolve, reject) => {
+      const child = spawn(this.helperPath, args, {
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
       });
-      const trimmed = stdout.trim();
-      if (!trimmed) return undefined as unknown as T;
-      return JSON.parse(trimmed) as T;
-    } catch (err: any) {
-      const rawOut = typeof err?.stdout === "string" ? err.stdout.trim() : "";
-      if (rawOut) {
+
+      const pid = child.pid;
+      if (pid) this.activeChildPids.add(pid);
+
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      let settled = false;
+      let killEscalationTimer: NodeJS.Timeout | undefined;
+
+      const terminateChildGroup = (sig: NodeJS.Signals) => {
+        if (!pid) return;
         try {
-          const parsed = JSON.parse(rawOut);
-          if (parsed && typeof parsed === "object" && parsed.error) {
-            if (parsed.code === "stale_handle") {
-              throw new StaleHandleError("ax_path", undefined);
-            }
-            if (parsed.code === "app_not_found") {
-              throw new AppNotFoundError(String(parsed.error));
-            }
-            throw new ComputerUseError(String(parsed.error), String(parsed.code || "operation_failed"), false, false);
+          if (process.platform !== "win32") {
+            process.kill(-pid, sig);
+          } else {
+            child.kill(sig);
           }
-        } catch (inner) {
-          if (inner instanceof ComputerUseError) throw inner;
+        } catch {
+          try {
+            child.kill(sig);
+          } catch {}
         }
-      }
-      throw new ComputerUseError(`macOS AX helper failed: ${err.message}`, "operation_failed", false, false);
+      };
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        terminateChildGroup("SIGTERM");
+        killEscalationTimer = setTimeout(() => terminateChildGroup("SIGKILL"), 250);
+        killEscalationTimer.unref?.();
+      }, timeoutMs);
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (stdout.length < 16 * 1024 * 1024) {
+          stdout += chunk.toString("utf8");
+        }
+      });
+
+      child.stderr.on("data", (chunk: Buffer) => {
+        if (stderr.length < 256 * 1024) {
+          stderr += chunk.toString("utf8");
+        }
+      });
+
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (killEscalationTimer) clearTimeout(killEscalationTimer);
+        if (pid) this.activeChildPids.delete(pid);
+        fn();
+      };
+
+      child.on("error", (err) => {
+        finish(() => {
+          reject(new ComputerUseError(`macOS AX helper failed to spawn: ${err.message}`, "operation_failed", false, false));
+        });
+      });
+
+      child.on("close", (code, signal) => {
+        finish(() => {
+          if (timedOut || signal === "SIGTERM" || signal === "SIGKILL") {
+            reject(new TimeoutError(actionLabel, timeoutMs, isMutating));
+            return;
+          }
+
+          const trimmed = stdout.trim();
+          if (code === 0) {
+            if (!trimmed) {
+              resolve(undefined as unknown as T);
+              return;
+            }
+            try {
+              resolve(JSON.parse(trimmed) as T);
+              return;
+            } catch (parseErr: any) {
+              reject(
+                new ComputerUseError(
+                  `Invalid JSON from macOS AX helper (${actionLabel}): ${parseErr.message}`,
+                  "operation_failed",
+                  false,
+                  isMutating
+                )
+              );
+              return;
+            }
+          }
+
+          if (trimmed) {
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (parsed && typeof parsed === "object" && parsed.error) {
+                const errMsg = String(parsed.error);
+                switch (parsed.code) {
+                  case "stale_handle":
+                    reject(new StaleHandleError("ax_path", undefined));
+                    return;
+                  case "app_not_found":
+                    reject(new AppNotFoundError(errMsg));
+                    return;
+                  case "window_not_found":
+                    reject(new WindowNotFoundError(errMsg));
+                    return;
+                  case "invalid_argument":
+                    reject(new InvalidArgumentError(errMsg));
+                    return;
+                  case "permission_denied":
+                    reject(new PermissionDeniedError(errMsg));
+                    return;
+                  default:
+                    reject(new ComputerUseError(errMsg, String(parsed.code || "operation_failed"), false, false));
+                    return;
+                }
+              }
+            } catch {
+              // Fall through to generic failure below
+            }
+          }
+
+          const detail = stderr.trim() || trimmed || `exit code ${code ?? "null"}`;
+          reject(new ComputerUseError(`macOS AX helper failed (${actionLabel}): ${detail}`, "operation_failed", false, isMutating));
+        });
+      });
+    });
+  }
+
+  async releaseHeldInputs(): Promise<void> {
+    for (const pid of [...this.activeChildPids]) {
+      try {
+        if (process.platform !== "win32") {
+          process.kill(-pid, "SIGTERM");
+        } else {
+          process.kill(pid, "SIGTERM");
+        }
+      } catch {}
+      this.activeChildPids.delete(pid);
+    }
+
+    for (const tmp of [...this.activeTempFiles]) {
+      try {
+        unlinkSync(tmp);
+      } catch {}
+      this.activeTempFiles.delete(tmp);
+    }
+
+    const buttons = [...this.heldMouseButtons];
+    this.heldMouseButtons.clear();
+    for (const btn of buttons) {
+      await this.runHelper(["pointer-op", "--op", "up", "--button", btn], 2000, true).catch(() => {});
     }
   }
 
@@ -94,13 +257,36 @@ export class MacOSAdapter implements PlatformAdapter {
     }
   }
 
+  private resolveTrackedElement(target: { type: "element"; state_id?: string; index?: number; handle?: string }): {
+    appRef: AppRef;
+    elem: UIElement;
+    stateId: string;
+  } {
+    const stateId = target.state_id;
+    if (!stateId || !this.activeStates.has(stateId)) {
+      throw new StaleHandleError(target.handle ?? target.index ?? "unknown", stateId);
+    }
+    const { appRef, tree } = this.activeStates.get(stateId)!;
+    const resolved = resolveElementWithAmbiguity(tree, target);
+    if (resolved.ambiguous) {
+      throw new AmbiguousElementError(
+        `Target matched ${resolved.count} elements. Specify a unique index or AXIdentifier handle.`,
+        []
+      );
+    }
+    if (!resolved.element) {
+      throw new ElementNotFoundError(`Element target not found: ${target.handle ?? target.index}`);
+    }
+    return { appRef, elem: resolved.element, stateId };
+  }
+
   private async resolveAppFromAppRef(appRef?: AppRef): Promise<AppInfo | undefined> {
     if (!appRef) return undefined;
     const apps = await this.listApps();
     if (typeof appRef.pid === "number" && appRef.pid > 0) {
       const byPid = apps.find((a) => a.pid === appRef.pid);
       if (byPid) return byPid;
-      return { pid: appRef.pid, name: appRef.name || String(appRef.pid), bundle_id: appRef.bundle_id, active: false };
+      throw new AppNotFoundError(String(appRef.pid));
     }
     if (appRef.bundle_id) {
       const found = apps.find((a) => a.bundle_id?.toLowerCase() === appRef.bundle_id!.toLowerCase());
@@ -122,14 +308,14 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async listApps(): Promise<AppInfo[]> {
-    return this.runHelper<AppInfo[]>(["list-apps"]);
+    return this.runHelper<AppInfo[]>(["list-apps"], 10000, false);
   }
 
   async listWindows(appRef?: AppRef): Promise<WindowInfo[]> {
     if (appRef?.pid) {
-      return this.runHelper<WindowInfo[]>(["list-windows", "--pid", String(appRef.pid)]);
+      return this.runHelper<WindowInfo[]>(["list-windows", "--pid", String(appRef.pid)], 10000, false);
     }
-    const windows = await this.runHelper<WindowInfo[]>(["list-windows"]);
+    const windows = await this.runHelper<WindowInfo[]>(["list-windows"], 10000, false);
     if (appRef?.bundle_id) {
       const lower = appRef.bundle_id.toLowerCase();
       return windows.filter((w) => w.bundle_id?.toLowerCase() === lower);
@@ -164,7 +350,7 @@ export class MacOSAdapter implements PlatformAdapter {
       app: AppInfo;
       active_window?: WindowInfo;
       elements: UIElement[];
-    }>(helperArgs);
+    }>(helperArgs, 12000, false);
 
     const windowId = appRef.window_id ?? data.active_window?.id ?? pid;
     const tree = assignHandlesToTree(windowId, data.elements || []);
@@ -184,7 +370,7 @@ export class MacOSAdapter implements PlatformAdapter {
       try {
         const shot = await this.takeScreenshot({ window_id: canonicalRef.window_id });
         screenshotBase64 = shot.base64;
-      } catch (_) {}
+      } catch {}
     }
 
     let totalNodes = 0;
@@ -211,19 +397,36 @@ export class MacOSAdapter implements PlatformAdapter {
     base64: string;
     width: number;
     height: number;
+    scale_factor: number;
+    point_width: number;
+    point_height: number;
   }> {
+    if (options.window_id !== undefined && options.display_id !== undefined) {
+      throw new InvalidArgumentError("Specify either window_id or display_id for screenshot, not both");
+    }
+
     const tempFile = join(tmpdir(), `zcode-cap-${randomUUID().slice(0, 8)}.png`);
     const args = ["-x", "-t", "png"];
 
-    if (options.window_id) {
+    if (options.window_id !== undefined) {
+      if (!Number.isInteger(options.window_id) || options.window_id <= 0) {
+        throw new InvalidArgumentError("window_id must be a positive integer");
+      }
       args.push("-l", String(options.window_id));
+    } else if (options.display_id !== undefined) {
+      if (!Number.isInteger(options.display_id) || options.display_id < 1) {
+        throw new InvalidArgumentError("display_id must be a 1-based positive display index");
+      }
+      args.push("-D", String(options.display_id));
     }
     args.push(tempFile);
 
+    this.activeTempFiles.add(tempFile);
     try {
-      await execFile("/usr/sbin/screencapture", args);
+      await execFile("/usr/sbin/screencapture", args, { timeout: 10000 });
       const buffer = await readFile(tempFile);
       await unlink(tempFile).catch(() => {});
+      this.activeTempFiles.delete(tempFile);
 
       let width = 1920;
       let height = 1080;
@@ -238,141 +441,177 @@ export class MacOSAdapter implements PlatformAdapter {
         height = buffer.readUInt32BE(20);
       }
 
+      const screenInfo = await this.getScreenInfo().catch(() => null);
+      const scaleFactor =
+        screenInfo?.main_display?.scale && screenInfo.main_display.scale > 0
+          ? screenInfo.main_display.scale
+          : 2;
+
       return {
         base64: buffer.toString("base64"),
         width,
         height,
+        scale_factor: scaleFactor,
+        point_width: Math.round(width / scaleFactor),
+        point_height: Math.round(height / scaleFactor),
       };
     } catch (err: any) {
       await unlink(tempFile).catch(() => {});
+      this.activeTempFiles.delete(tempFile);
+      if (err?.killed || err?.signal === "SIGTERM" || err?.code === "ETIMEDOUT") {
+        throw new TimeoutError("screencapture", 10000, false);
+      }
       throw new ComputerUseError(`Failed to take screenshot: ${err.message}`, "operation_failed");
     }
   }
 
   async getScreenInfo(): Promise<{
     displays: number;
-    main_display: { width: number; height: number; scale: number };
+    main_display: { width: number; height: number; scale: number; pixel_width?: number; pixel_height?: number };
+    displays_detail?: Array<{
+      id: number;
+      is_main: boolean;
+      bounds: { x: number; y: number; width: number; height: number };
+      scale: number;
+    }>;
     platform: string;
   }> {
-    return this.runHelper(["screen-info"]);
+    return this.runHelper(["screen-info"], 5000, false);
   }
 
   async launchApp(nameOrBundleId: string, activate = true): Promise<AppInfo> {
+    if (!nameOrBundleId || typeof nameOrBundleId !== "string" || !nameOrBundleId.trim()) {
+      throw new InvalidArgumentError("Application name or bundle identifier must be a non-empty string");
+    }
     const isBundleId = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)+$/.test(nameOrBundleId) && !nameOrBundleId.endsWith(".app");
     const openArgs = isBundleId ? ["-b", nameOrBundleId] : ["-a", nameOrBundleId];
     if (!activate) {
       openArgs.unshift("-g");
     }
-    await execFile("open", openArgs);
-    await new Promise((r) => setTimeout(r, 500));
+    await execFile("open", openArgs, { timeout: 10000 });
 
-    const apps = await this.listApps();
     const cleaned = nameOrBundleId.replace(/\.app$/i, "").toLowerCase();
-    const app = apps.find(
-      (a) =>
-        a.name.toLowerCase() === cleaned ||
-        a.name.toLowerCase() === nameOrBundleId.toLowerCase() ||
-        a.bundle_id?.toLowerCase() === nameOrBundleId.toLowerCase()
-    );
-    return app || { pid: 0, name: nameOrBundleId, active: activate };
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const apps = await this.listApps();
+      const app = apps.find(
+        (a) =>
+          a.name.toLowerCase() === cleaned ||
+          a.name.toLowerCase() === nameOrBundleId.toLowerCase() ||
+          a.bundle_id?.toLowerCase() === nameOrBundleId.toLowerCase()
+      );
+      if (app) return app;
+    }
+
+    return { pid: 0, name: nameOrBundleId, active: false };
   }
 
   async focusApp(appRef: AppRef): Promise<boolean> {
     const pid = await this.resolvePidFromAppRef(appRef).catch(() => undefined);
     if (!pid) return false;
-    const res = await this.runHelper<{ ok: boolean }>(["focus-app", "--pid", String(pid)]).catch(() => ({ ok: false }));
+    const res = await this.runHelper<{ ok: boolean }>(["focus-app", "--pid", String(pid)], 5000, true);
     return Boolean(res?.ok);
   }
 
+  private assertWindowId(windowId: number): number {
+    if (typeof windowId !== "number" || !Number.isInteger(windowId) || windowId <= 0) {
+      throw new InvalidArgumentError(`window_id must be a positive integer (got ${String(windowId)})`);
+    }
+    return windowId;
+  }
+
   async focusWindow(windowId: number): Promise<boolean> {
-    const res = await this.runHelper<{ ok: boolean }>([
-      "window-op",
-      "--op", "focus",
-      "--window-id", String(windowId),
-    ]).catch(() => ({ ok: false }));
+    this.assertWindowId(windowId);
+    const res = await this.runHelper<{ ok: boolean }>(
+      ["window-op", "--op", "focus", "--window-id", String(windowId)],
+      8000,
+      true
+    );
     return Boolean(res?.ok);
   }
 
   async moveWindow(windowId: number, x: number, y: number): Promise<boolean> {
-    const res = await this.runHelper<{ ok: boolean }>([
-      "window-op",
-      "--op", "move",
-      "--window-id", String(windowId),
-      "--x", String(Math.round(x)),
-      "--y", String(Math.round(y)),
-    ]).catch(() => ({ ok: false }));
+    this.assertWindowId(windowId);
+    assertFiniteCoord(x, "x");
+    assertFiniteCoord(y, "y");
+    const res = await this.runHelper<{ ok: boolean }>(
+      ["window-op", "--op", "move", "--window-id", String(windowId), "--x", String(Math.round(x)), "--y", String(Math.round(y))],
+      8000,
+      true
+    );
     return Boolean(res?.ok);
   }
 
   async resizeWindow(windowId: number, width: number, height: number): Promise<boolean> {
-    const res = await this.runHelper<{ ok: boolean }>([
-      "window-op",
-      "--op", "resize",
-      "--window-id", String(windowId),
-      "--width", String(Math.round(width)),
-      "--height", String(Math.round(height)),
-    ]).catch(() => ({ ok: false }));
+    this.assertWindowId(windowId);
+    assertFiniteCoord(width, "width");
+    assertFiniteCoord(height, "height");
+    if (width <= 10 || height <= 10) {
+      throw new InvalidArgumentError("Window width and height must be > 10");
+    }
+    const res = await this.runHelper<{ ok: boolean }>(
+      [
+        "window-op",
+        "--op",
+        "resize",
+        "--window-id",
+        String(windowId),
+        "--width",
+        String(Math.round(width)),
+        "--height",
+        String(Math.round(height)),
+      ],
+      8000,
+      true
+    );
     return Boolean(res?.ok);
   }
 
   async minimizeWindow(windowId: number): Promise<boolean> {
-    const res = await this.runHelper<{ ok: boolean }>([
-      "window-op",
-      "--op", "minimize",
-      "--window-id", String(windowId),
-    ]).catch(() => ({ ok: false }));
+    this.assertWindowId(windowId);
+    const res = await this.runHelper<{ ok: boolean }>(
+      ["window-op", "--op", "minimize", "--window-id", String(windowId)],
+      8000,
+      true
+    );
     return Boolean(res?.ok);
   }
 
   async maximizeWindow(windowId: number): Promise<boolean> {
-    const res = await this.runHelper<{ ok: boolean }>([
-      "window-op",
-      "--op", "maximize",
-      "--window-id", String(windowId),
-    ]).catch(() => ({ ok: false }));
+    this.assertWindowId(windowId);
+    const res = await this.runHelper<{ ok: boolean }>(
+      ["window-op", "--op", "maximize", "--window-id", String(windowId)],
+      8000,
+      true
+    );
     return Boolean(res?.ok);
   }
 
   async movePointer(x: number, y: number): Promise<ActionResult> {
-    await this.runHelper([
-      "pointer-op",
-      "--op", "move",
-      "--x", String(Math.round(x)),
-      "--y", String(Math.round(y)),
-    ]);
+    assertFiniteCoord(x, "x");
+    assertFiniteCoord(y, "y");
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    await this.runHelper(["pointer-op", "--op", "move", "--x", String(rx), "--y", String(ry)], 5000, true);
     return {
       ok: true,
       action: "move_pointer",
       action_sent: true,
-      receipt: `Dispatched CoreGraphics mouse move to (${x}, ${y})`,
+      receipt: `Dispatched CoreGraphics mouse move to (${rx}, ${ry})`,
     };
   }
 
   async click(target: Target, options: ClickOptions = {}): Promise<ActionResult> {
     const button = options.button || "left";
-    const clickCount = options.clickCount || 1;
+    const clickCount = options.clickCount ?? 1;
+    if (!Number.isInteger(clickCount) || clickCount < 1 || clickCount > 10) {
+      throw new InvalidArgumentError("clickCount must be an integer between 1 and 10");
+    }
     const strategy = options.strategy || "auto";
     const mods = options.modifiers || [];
 
     if (target.type === "element") {
-      const stateId = target.state_id;
-      if (!stateId || !this.activeStates.has(stateId)) {
-        throw new StaleHandleError(target.handle ?? target.index ?? "unknown", stateId);
-      }
-
-      const { appRef, tree } = this.activeStates.get(stateId)!;
-      const resolved = resolveElementWithAmbiguity(tree, target);
-      if (resolved.ambiguous) {
-        throw new AmbiguousElementError(
-          `Target matched ${resolved.count} elements. Specify a unique index or AXIdentifier handle.`,
-          []
-        );
-      }
-      if (!resolved.element) {
-        throw new ElementNotFoundError(`Element target not found: ${target.handle ?? target.index}`);
-      }
-
-      const elem = resolved.element;
+      const { appRef, elem } = this.resolveTrackedElement(target);
       const advertisesAXPress =
         elem.actions.includes("AXPress") ||
         elem.actions.includes("press") ||
@@ -390,13 +629,21 @@ export class MacOSAdapter implements PlatformAdapter {
       //    (prevents Qt6 QCocoaAccessibilityElement silent AXError=0 no-ops on AXRaise-only controls)
       if (canUseAXPress) {
         try {
-          await this.runHelper([
+          const axArgs = [
             "act-element",
-            "--pid", String(appRef.pid),
-            "--path", JSON.stringify(elem.ax_path),
-            "--action", "AXPress",
-            "--expected-role", elem.role,
-          ]);
+            "--pid",
+            String(appRef.pid),
+            "--path",
+            JSON.stringify(elem.ax_path),
+            "--action",
+            "AXPress",
+            "--expected-role",
+            elem.role,
+          ];
+          if (elem.identifier) axArgs.push("--expected-identifier", elem.identifier);
+          if (elem.name) axArgs.push("--expected-name", elem.name);
+
+          await this.runHelper(axArgs, 8000, true);
           return {
             ok: true,
             action: "click",
@@ -405,7 +652,7 @@ export class MacOSAdapter implements PlatformAdapter {
             target,
           };
         } catch (axErr: any) {
-          if (axErr instanceof StaleHandleError) {
+          if (axErr instanceof StaleHandleError || axErr instanceof TimeoutError) {
             throw axErr;
           }
           if (strategy === "a11y") {
@@ -444,11 +691,16 @@ export class MacOSAdapter implements PlatformAdapter {
       const targetY = Math.round(elem.bounds.y + elem.bounds.height / 2);
       const coordArgs = [
         "click-coord",
-        "--x", String(targetX),
-        "--y", String(targetY),
-        "--button", button,
-        "--count", String(clickCount),
-        "--restore-cursor", "1",
+        "--x",
+        String(targetX),
+        "--y",
+        String(targetY),
+        "--button",
+        button,
+        "--count",
+        String(clickCount),
+        "--restore-cursor",
+        "1",
       ];
       if (mods.length > 0) {
         coordArgs.push("--modifiers", mods.join(","));
@@ -457,7 +709,7 @@ export class MacOSAdapter implements PlatformAdapter {
         coordArgs.push("--require-pid", String(appRef.pid));
       }
 
-      await this.runHelper(coordArgs);
+      await this.runHelper(coordArgs, 10000, true);
       return {
         ok: true,
         action: "click",
@@ -469,31 +721,32 @@ export class MacOSAdapter implements PlatformAdapter {
 
     // Coordinate target
     if (strategy === "a11y") {
-      throw new ComputerUseError(
-        `strategy="a11y" requires an element target`,
-        "invalid_argument",
-        false,
-        false
-      );
+      throw new InvalidArgumentError(`strategy="a11y" requires an element target`);
     }
 
+    const cx = Math.round(assertFiniteCoord(target.x, "target.x"));
+    const cy = Math.round(assertFiniteCoord(target.y, "target.y"));
     const coordArgs = [
       "click-coord",
-      "--x", String(target.x),
-      "--y", String(target.y),
-      "--button", button,
-      "--count", String(clickCount),
+      "--x",
+      String(cx),
+      "--y",
+      String(cy),
+      "--button",
+      button,
+      "--count",
+      String(clickCount),
     ];
     if (mods.length > 0) {
       coordArgs.push("--modifiers", mods.join(","));
     }
 
-    await this.runHelper(coordArgs);
+    await this.runHelper(coordArgs, 10000, true);
     return {
       ok: true,
       action: "click",
       action_sent: true,
-      receipt: `Dispatched CoreGraphics ${button} click (${clickCount}x) at (${target.x}, ${target.y})`,
+      receipt: `Dispatched CoreGraphics ${button} click (${clickCount}x) at (${cx}, ${cy})`,
       target,
     };
   }
@@ -511,7 +764,8 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async mouseDown(button: "left" | "right" | "middle" = "left"): Promise<ActionResult> {
-    await this.runHelper(["pointer-op", "--op", "down", "--button", button]);
+    await this.runHelper(["pointer-op", "--op", "down", "--button", button], 5000, true);
+    this.heldMouseButtons.add(button);
     return {
       ok: true,
       action: "mouse_down",
@@ -521,7 +775,8 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async mouseUp(button: "left" | "right" | "middle" = "left"): Promise<ActionResult> {
-    await this.runHelper(["pointer-op", "--op", "up", "--button", button]);
+    await this.runHelper(["pointer-op", "--op", "up", "--button", button], 5000, true);
+    this.heldMouseButtons.delete(button);
     return {
       ok: true,
       action: "mouse_up",
@@ -531,34 +786,59 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async drag(toX: number, toY: number, fromX?: number, fromY?: number): Promise<ActionResult> {
-    const args = [
-      "pointer-op",
-      "--op", "drag",
-      "--to-x", String(Math.round(toX)),
-      "--to-y", String(Math.round(toY)),
-    ];
-    if (fromX !== undefined && fromY !== undefined) {
-      args.push("--from-x", String(Math.round(fromX)), "--from-y", String(Math.round(fromY)));
+    const rToX = Math.round(assertFiniteCoord(toX, "toX"));
+    const rToY = Math.round(assertFiniteCoord(toY, "toY"));
+    const args = ["pointer-op", "--op", "drag", "--to-x", String(rToX), "--to-y", String(rToY)];
+    if (fromX !== undefined || fromY !== undefined) {
+      const rFromX = Math.round(assertFiniteCoord(fromX, "fromX"));
+      const rFromY = Math.round(assertFiniteCoord(fromY, "fromY"));
+      args.push("--from-x", String(rFromX), "--from-y", String(rFromY));
     }
-    await this.runHelper(args);
+    await this.runHelper(args, 10000, true);
     return {
       ok: true,
       action: "left_click_drag",
       action_sent: true,
-      receipt: `Dragged pointer to (${toX}, ${toY})`,
+      receipt: `Dragged pointer to (${rToX}, ${rToY})`,
     };
   }
 
   async scroll(options: ScrollOptions): Promise<ActionResult> {
-    const deltaY = options.deltaY ?? (options.direction === "up" ? -100 : options.direction === "down" ? 100 : 0);
-    const deltaX = options.deltaX ?? (options.direction === "left" ? -100 : options.direction === "right" ? 100 : 0);
+    if (options.target) {
+      if (options.target.type === "coordinate") {
+        await this.movePointer(options.target.x, options.target.y);
+      } else if (options.target.type === "element") {
+        const { elem } = this.resolveTrackedElement(options.target);
+        if (!elem.bounds || elem.bounds.width <= 0 || elem.bounds.height <= 0) {
+          throw new ComputerUseError(
+            `Element ${elem.role} "${elem.name}" lacks valid screen bounds for targeted scroll`,
+            "action_unavailable",
+            false,
+            false
+          );
+        }
+        await this.movePointer(
+          Math.round(elem.bounds.x + elem.bounds.width / 2),
+          Math.round(elem.bounds.y + elem.bounds.height / 2)
+        );
+      }
+    }
 
-    await this.runHelper([
-      "pointer-op",
-      "--op", "scroll",
-      "--delta-y", String(Math.round(deltaY)),
-      "--delta-x", String(Math.round(deltaX)),
-    ]);
+    const rawDeltaY =
+      options.deltaY ??
+      options.delta ??
+      (options.direction === "up" ? -100 : options.direction === "down" ? 100 : 0);
+    const rawDeltaX =
+      options.deltaX ?? (options.direction === "left" ? -100 : options.direction === "right" ? 100 : 0);
+
+    const deltaY = Math.round(assertFiniteCoord(rawDeltaY, "deltaY"));
+    const deltaX = Math.round(assertFiniteCoord(rawDeltaX, "deltaX"));
+
+    await this.runHelper(
+      ["pointer-op", "--op", "scroll", "--delta-y", String(deltaY), "--delta-x", String(deltaX)],
+      5000,
+      true
+    );
     return {
       ok: true,
       action: "scroll",
@@ -569,12 +849,30 @@ export class MacOSAdapter implements PlatformAdapter {
 
   async typeText(text: string, options?: TypeOptions, target?: Target): Promise<ActionResult> {
     if (target) {
-      if (target.type === "element" && options?.strategy !== "event") {
-        // Try semantic setValue first if target is editable
-        try {
-          return await this.setValue(target, text);
-        } catch (_) {
-          await this.click(target, { strategy: options?.strategy });
+      if (target.type === "element") {
+        const { elem } = this.resolveTrackedElement(target);
+        if (!isEditableElement(elem)) {
+          throw new ComputerUseError(
+            `Target element ${elem.role} "${elem.name}" is not editable; refusing to click non-editable control during typeText`,
+            "not_settable",
+            false,
+            false
+          );
+        }
+
+        if (options?.strategy !== "event") {
+          try {
+            return await this.setValue(target, text);
+          } catch (setErr: any) {
+            if (setErr instanceof StaleHandleError || setErr instanceof TimeoutError || options?.strategy === "a11y") {
+              throw setErr;
+            }
+            // Editable custom control rejected AXValue write; focus element via click then type
+            await this.click(target, { strategy: options?.strategy });
+            await new Promise((r) => setTimeout(r, 80));
+          }
+        } else {
+          await this.click(target, { strategy: "event" });
           await new Promise((r) => setTimeout(r, 80));
         }
       } else {
@@ -601,13 +899,19 @@ export class MacOSAdapter implements PlatformAdapter {
       );
     }
 
+    if (options?.clearFirst) {
+      await this.pressKey("a", ["cmd"], { appRef: options?.appRef, strategy: options?.strategy });
+      await this.pressKey("backspace", [], { appRef: options?.appRef, strategy: options?.strategy });
+    }
+
     const helperArgs = ["type-unicode", "--text", text];
     const useBackgroundPid = resolvedApp && !resolvedApp.active && options?.strategy !== "event";
     if (useBackgroundPid) {
       helperArgs.push("--pid", String(resolvedApp.pid));
     }
 
-    await this.runHelper(helperArgs);
+    const dynamicTimeoutMs = Math.min(60000, Math.max(15000, text.length * 8 + 5000));
+    await this.runHelper(helperArgs, dynamicTimeoutMs, true);
     return {
       ok: true,
       action: "type_text",
@@ -627,6 +931,10 @@ export class MacOSAdapter implements PlatformAdapter {
         false,
         false
       );
+    }
+
+    if (options?.repeat !== undefined && (!Number.isInteger(options.repeat) || options.repeat < 1 || options.repeat > 100)) {
+      throw new InvalidArgumentError("repeat must be an integer between 1 and 100");
     }
 
     const resolvedApp = options?.appRef ? await this.resolveAppFromAppRef(options.appRef) : undefined;
@@ -653,7 +961,7 @@ export class MacOSAdapter implements PlatformAdapter {
       helperArgs.push("--pid", String(resolvedApp.pid));
     }
 
-    await this.runHelper(helperArgs);
+    await this.runHelper(helperArgs, 15000, true);
     const modDesc = modifiers.length ? ` with ${modifiers.join("+")}` : "";
     return {
       ok: true,
@@ -666,7 +974,9 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async hotkey(keys: string[], options?: KeyOptions): Promise<ActionResult> {
-    if (keys.length === 0) throw new ComputerUseError("Hotkey requires at least one key", "invalid_argument");
+    if (!Array.isArray(keys) || keys.length === 0) {
+      throw new InvalidArgumentError("Hotkey requires at least one key");
+    }
     const mainKey = keys[keys.length - 1];
     const modifiers = keys.slice(0, keys.length - 1);
     return this.pressKey(mainKey, modifiers, options);
@@ -674,14 +984,14 @@ export class MacOSAdapter implements PlatformAdapter {
 
   async setValue(target: Target, value: string): Promise<ActionResult> {
     if (target.type !== "element") {
-      throw new ComputerUseError("setValue requires an element target", "invalid_argument");
+      throw new InvalidArgumentError("setValue requires an element target");
     }
     return this.performElementAction(target, "setValue", value);
   }
 
   async performAction(target: Target, actionName: string): Promise<ActionResult> {
     if (target.type !== "element") {
-      throw new ComputerUseError("performAction requires an element target", "invalid_argument");
+      throw new InvalidArgumentError("performAction requires an element target");
     }
     return this.performElementAction(target, actionName);
   }
@@ -691,24 +1001,7 @@ export class MacOSAdapter implements PlatformAdapter {
     action: string,
     value?: string
   ): Promise<ActionResult> {
-    const stateId = target.state_id;
-    if (!stateId || !this.activeStates.has(stateId)) {
-      throw new StaleHandleError(target.handle ?? target.index ?? "unknown", stateId);
-    }
-
-    const { appRef, tree } = this.activeStates.get(stateId)!;
-    const resolved = resolveElementWithAmbiguity(tree, target);
-    if (resolved.ambiguous) {
-      throw new AmbiguousElementError(
-        `Target matched ${resolved.count} elements. Action rejected to prevent unintended side effects.`,
-        []
-      );
-    }
-    if (!resolved.element) {
-      throw new ElementNotFoundError(`Element target not found in state ${stateId}`);
-    }
-
-    const elem = resolved.element;
+    const { appRef, elem, stateId } = this.resolveTrackedElement(target);
     if (!appRef.pid || !Array.isArray(elem.ax_path)) {
       throw new ComputerUseError(
         `Element "${elem.name}" has no native AX path bound in state ${stateId}`,
@@ -718,23 +1011,33 @@ export class MacOSAdapter implements PlatformAdapter {
 
     const helperArgs = [
       "act-element",
-      "--pid", String(appRef.pid),
-      "--path", JSON.stringify(elem.ax_path),
-      "--action", action,
-      "--expected-role", elem.role,
+      "--pid",
+      String(appRef.pid),
+      "--path",
+      JSON.stringify(elem.ax_path),
+      "--action",
+      action,
+      "--expected-role",
+      elem.role,
     ];
+    if (elem.identifier) {
+      helperArgs.push("--expected-identifier", elem.identifier);
+    }
+    if (elem.name) {
+      helperArgs.push("--expected-name", elem.name);
+    }
     if (value !== undefined) {
       helperArgs.push("--value", value);
     }
 
-    await this.runHelper(helperArgs);
+    await this.runHelper(helperArgs, 8000, true);
 
     if (action === "setValue") {
       return {
         ok: true,
         action: "set_value",
         action_sent: true,
-        receipt: `Set value of ${elem.role} "${elem.name}" to "${value}" (pid=${appRef.pid}, zero focus steal)`,
+        receipt: `Set value of ${elem.role} "${elem.name}" (${(value ?? "").length} chars, pid=${appRef.pid}, zero focus steal)`,
       };
     }
 
@@ -747,26 +1050,34 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async readClipboard(): Promise<string> {
-    const { stdout } = await execFile("pbpaste", []);
+    const { stdout } = await execFile("pbpaste", [], { timeout: 5000 });
     return stdout;
   }
 
   async writeClipboard(text: string): Promise<boolean> {
     return new Promise((resolve, reject) => {
       const child = spawn("pbcopy");
+      const timer = setTimeout(() => {
+        child.kill("SIGTERM");
+        reject(new TimeoutError("pbcopy", 5000, true));
+      }, 5000);
       child.stdin.write(text, "utf8");
       child.stdin.end();
       child.on("close", (code) => {
+        clearTimeout(timer);
         if (code === 0) resolve(true);
         else reject(new ComputerUseError(`pbcopy exited with code ${code}`, "operation_failed"));
       });
-      child.on("error", (err) => reject(new ComputerUseError(`pbcopy failed: ${err.message}`, "operation_failed")));
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(new ComputerUseError(`pbcopy failed: ${err.message}`, "operation_failed"));
+      });
     });
   }
 
   async checkPermissions(): Promise<PermissionReport> {
     try {
-      const res = await this.runHelper<{ accessibility: boolean; screen_recording: boolean }>(["permissions"], 5000);
+      const res = await this.runHelper<{ accessibility: boolean; screen_recording: boolean }>(["permissions"], 5000, false);
       return {
         accessibility: Boolean(res?.accessibility),
         screen_recording: Boolean(res?.screen_recording),

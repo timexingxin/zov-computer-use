@@ -15,7 +15,8 @@ test("CLI Doctor executes and emits valid structured diagnostic report", async (
   assert.equal(typeof report.checks.os.supported, "boolean");
   assert.equal(typeof report.checks.permissions.accessibility, "boolean");
   assert.equal(typeof report.checks.permissions.screen_recording, "boolean");
-  assert.ok(report.checks.mcp.tools_count >= 30, "MCP tools count must be >= 30");
+  assert.equal(typeof report.checks.environment.native_ax_helper, "boolean");
+  assert.equal(report.checks.mcp.tools_count, 47, "MCP tools count must be 47");
   assert.equal(report.checks.mcp.available, true);
 });
 

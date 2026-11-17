@@ -9,10 +9,31 @@ import type {
 /**
  * Converts a UIElement into a token-lean CompactUIElement.
  */
+const PASSWORD_HINT_RE = /\b(password|passcode|passwd|pin\s*code)\b|密码|口令/i;
+
+export function isSensitivePasswordElement(elem: {
+  role: string;
+  subrole?: string;
+  name?: string;
+  description?: string;
+  identifier?: string;
+}): boolean {
+  const roleLower = (elem.role || "").toLowerCase();
+  const subLower = (elem.subrole || "").toLowerCase();
+  if (roleLower === "securetextfield" || subLower === "securetextfield") {
+    return true;
+  }
+  if (["textfield", "textarea", "combobox", "searchfield"].includes(roleLower)) {
+    const meta = `${elem.name || ""} ${elem.description || ""} ${elem.identifier || ""}`;
+    if (PASSWORD_HINT_RE.test(meta)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function redactElementSecrets(elem: UIElement): UIElement {
-  const isSecure =
-    elem.role.toLowerCase() === "securetextfield" ||
-    elem.subrole?.toLowerCase() === "securetextfield";
+  const isSecure = isSensitivePasswordElement(elem);
   const redactedValue =
     isSecure && elem.value !== undefined && elem.value !== ""
       ? "[REDACTED_PASSWORD]"
@@ -25,9 +46,7 @@ export function redactElementSecrets(elem: UIElement): UIElement {
 }
 
 export function toCompactElement(elem: UIElement): CompactUIElement {
-  const isSecure =
-    elem.role.toLowerCase() === "securetextfield" ||
-    elem.subrole?.toLowerCase() === "securetextfield";
+  const isSecure = isSensitivePasswordElement(elem);
   const compact: CompactUIElement = {
     i: elem.index,
     h: elem.handle,
@@ -114,32 +133,36 @@ export function reduceToCompactState(state: AppState): CompactAppState {
  * Avoids resending the full tree when only minor controls changed.
  */
 export function computeStateDiff(baseState: AppState, currentState: AppState): DiffAppState {
+  const baseCounts = new Map<string, number>();
   const baseMap = new Map<string, CompactUIElement>();
   for (const elem of flattenAndFilterTree(baseState.tree, false)) {
-    baseMap.set(elem.h, elem);
+    const occ = baseCounts.get(elem.h) || 0;
+    baseCounts.set(elem.h, occ + 1);
+    baseMap.set(`${elem.h}#${occ}`, elem);
   }
 
-  const currentElements = flattenAndFilterTree(currentState.tree, false);
+  const curCounts = new Map<string, number>();
   const currentMap = new Map<string, CompactUIElement>();
   const added: CompactUIElement[] = [];
   const modified: CompactUIElement[] = [];
 
-  for (const cur of currentElements) {
-    currentMap.set(cur.h, cur);
-    const prev = baseMap.get(cur.h);
+  for (const cur of flattenAndFilterTree(currentState.tree, false)) {
+    const occ = curCounts.get(cur.h) || 0;
+    curCounts.set(cur.h, occ + 1);
+    const occKey = `${cur.h}#${occ}`;
+    currentMap.set(occKey, cur);
+    const prev = baseMap.get(occKey);
     if (!prev) {
       added.push(cur);
-    } else {
-      if (prev.n !== cur.n || prev.v !== cur.v || prev.c.join(",") !== cur.c.join(",")) {
-        modified.push(cur);
-      }
+    } else if (prev.n !== cur.n || prev.v !== cur.v || prev.c.join(",") !== cur.c.join(",")) {
+      modified.push(cur);
     }
   }
 
   const removedHandles: string[] = [];
-  for (const [handle] of baseMap) {
-    if (!currentMap.has(handle)) {
-      removedHandles.push(handle);
+  for (const [occKey, elem] of baseMap) {
+    if (!currentMap.has(occKey)) {
+      removedHandles.push(elem.h);
     }
   }
 

@@ -1,27 +1,29 @@
-# Release Process (docs/RELEASE.md)
+# Release Process (`docs/RELEASE.md`)
 
-This project strictly follows [Semantic Versioning (SemVer)](https://semver.org/).
+This project follows [Semantic Versioning (SemVer)](https://semver.org/).
 
 ---
 
 ## Release Checklist
 
-1. **Clean Working Tree**: Ensure `git status` has zero untracked files or unstaged changes.
-2. **Typecheck & Tests**:
+1. **Clean Working Tree**: Ensure `git status` has zero untracked files or unstaged temporary artifacts.
+2. **Lint, Build, Typecheck & Tests**:
    ```bash
-   pnpm run typecheck
-   pnpm run test
+   npm run clean
+   npm run build
+   npm run typecheck
+   npm run lint
+   npm test
    ```
-3. **Doctor Verification**:
+3. **Doctor & Stdio Probe Verification**:
    ```bash
-   pnpm run doctor
+   npm run doctor
+   npm run probe
    ```
-4. **Secret Scan**:
-   Verify zero sensitive keys or local paths exist.
-5. **Tag & Publish**:
+4. **Tag & Publish**:
    ```bash
-   git tag v0.1.0
+   git tag v0.2.0
    git push origin main --tags
    ```
-6. **GitHub Release**:
-   Create a GitHub release draft with release notes from `CHANGELOG.md`.
+5. **GitHub Release**:
+   Draft a GitHub release summarizing verified changes, test counts, and platform boundaries.
