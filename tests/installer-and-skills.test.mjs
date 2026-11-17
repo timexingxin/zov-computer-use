@@ -136,7 +136,8 @@ test("Installer honors --preserve-skills without overwriting customized SKILL.md
     );
 
     const updatedCfg = JSON.parse(readFileSync(mcpCfgPath, "utf-8"));
-    assert.ok(updatedCfg.mcpServers["zov-cua"].args[0].endsWith("runtime/dist/bin/server.js"));
+    const normalizedArg0 = updatedCfg.mcpServers["zov-cua"].args[0].replace(/\\/g, "/");
+    assert.ok(normalizedArg0.endsWith("runtime/dist/bin/server.js"));
     assert.equal(readFileSync(join(agySkillsDir, "SKILL.md"), "utf-8"), customSkillText, "Custom SKILL.md must be preserved");
   } finally {
     rmSync(fakeHome, { recursive: true, force: true });

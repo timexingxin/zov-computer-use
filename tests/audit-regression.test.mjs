@@ -22,6 +22,7 @@ import {
 import { MCPServer, TOOLS_MANIFEST } from "../packages/mcp-server/dist/index.js";
 import { MacOSAdapter } from "../packages/platform-macos/dist/index.js";
 import { WindowsAdapter } from "../packages/platform-windows/dist/index.js";
+import { LinuxAdapter } from "../packages/platform-linux/dist/index.js";
 import { runDoctor } from "../packages/cli/dist/index.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -168,10 +169,11 @@ test("C1 + R13 + B1: Password redaction holds across full/compact/diff and all r
 test("C2 + B2: Mutating helper timeout throws TimeoutError with actionSent=true; read-only timeout sets actionSent=false", async () => {
   const adapter = new MacOSAdapter();
   const tmpDir = mkdtempSync(join(tmpdir(), "cua-timeout-test-"));
-  const slowHelper = join(tmpDir, "slow-helper.sh");
-  writeFileSync(slowHelper, "#!/bin/sh\nsleep 2\n", { mode: 0o755 });
+  const slowScript = join(tmpDir, "slow-helper.mjs");
+  writeFileSync(slowScript, "setTimeout(() => {}, 4000);\n", "utf-8");
   try {
-    adapter.helperPath = slowHelper;
+    adapter.helperPath = process.execPath;
+    adapter.helperArgsPrefix = [slowScript];
 
     await assert.rejects(
       () => adapter.runHelper(["click-coord", "--x", "10", "--y", "10"], 80, true),
@@ -196,20 +198,47 @@ test("C2 + B2: Mutating helper timeout throws TimeoutError with actionSent=true;
   }
 });
 
-test("C3 + B12: WindowsAdapter fails closed across direct and MCP calls with zero PowerShell execution", async () => {
+test("C3 + B12: WindowsAdapter never invokes PowerShell/CMD on injection payloads; unimplemented LinuxAdapter fails closed", async () => {
   const win = new WindowsAdapter();
-  await assert.rejects(() => win.launchApp('calc"; Invoke-Expression "evil"; "'), UnsupportedPlatformError);
-  await assert.rejects(() => win.focusApp({ name: "x'; Start-Process calc; '" }), UnsupportedPlatformError);
-  await assert.rejects(() => win.listApps(), UnsupportedPlatformError);
-  await assert.rejects(() => win.listWindows(), UnsupportedPlatformError);
+  const capturedArgv = [];
+  const tmpDir = mkdtempSync(join(tmpdir(), "zov-win-argv-"));
+  const echoHelper = join(tmpDir, "echo-argv.mjs");
+  writeFileSync(
+    echoHelper,
+    `const args = process.argv.slice(2);
+if (args[0] === "list-apps") {
+  console.log("[]");
+} else {
+  console.log(JSON.stringify({ ok: true, pid: 0, argv: args }));
+}
+`,
+    "utf-8"
+  );
+  try {
+    win.helperPath = process.execPath;
+    win.helperArgsPrefix = [echoHelper];
+    const origRunHelper = win.runHelper.bind(win);
+    win.runHelper = async (args, timeoutMs, isMutating) => {
+      capturedArgv.push(args);
+      return origRunHelper(args, timeoutMs, isMutating);
+    };
 
-  const perms = await win.requestAccess();
-  assert.deepEqual(perms, { accessibility: false, screen_recording: false });
+    const evilPayload = 'calc"; Invoke-Expression "evil"; & calc.exe | powershell -enc AAA';
+    await win.launchApp(evilPayload, false);
+    assert.deepEqual(capturedArgv[0], ["launch-app", "--target", evilPayload, "--activate", "0"]);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 
-  const server = new MCPServer(win);
+  const linux = new LinuxAdapter();
+  await assert.rejects(() => linux.launchApp("gedit"), UnsupportedPlatformError);
+  await assert.rejects(() => linux.listApps(), UnsupportedPlatformError);
+  await assert.rejects(() => linux.listWindows(), UnsupportedPlatformError);
+
+  const server = new MCPServer(linux);
   for (const [tool, args] of [
-    ["launch_app", { name: 'calc"; Invoke-Expression "evil"; "' }],
-    ["focus_app", { app_ref: { name: "x'; Start-Process calc; '" } }],
+    ["launch_app", { name: "gedit" }],
+    ["focus_app", { app_ref: { name: "gedit" } }],
   ]) {
     const res = await server.handleCallTool(tool, args);
     assert.equal(res.isError, true);

@@ -15,6 +15,7 @@ DEFAULT_CONFIG_CANDIDATES = [
     "~/.gemini/antigravity/mcp_config.json",
     "~/.cursor/mcp.json",
     "~/.claude.json",
+    "~/.qoder/mcp.json",
 ]
 
 
@@ -54,15 +55,22 @@ class Client:
         self.cleanup_errors = []
 
     async def start(self, command, args=(), env=None):
+        spawn_kwargs = {
+            "env": env,
+            "stdin": asyncio.subprocess.PIPE,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "limit": 8 * 1024 * 1024,
+        }
+        if os.name == "nt":
+            spawn_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            spawn_kwargs["start_new_session"] = True
+
         self.process = await asyncio.create_subprocess_exec(
             command,
             *args,
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-            limit=8 * 1024 * 1024,
+            **spawn_kwargs,
         )
 
         async def drain_stderr():
@@ -173,7 +181,7 @@ class Client:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "zov-cua-readonly-probe", "version": "1.0.0"},
+                "clientInfo": {"name": "zov-cua-readonly-probe", "version": "1.1.0"},
             },
         )
         await self.notify("notifications/initialized")
@@ -195,7 +203,10 @@ class Client:
         needs_signal = self.process.returncode is None or (self.stderr_task and not self.stderr_task.done())
         if needs_signal:
             try:
-                os.killpg(self.process.pid, signal.SIGTERM)
+                if hasattr(os, "killpg"):
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                else:
+                    self.process.terminate()
             except ProcessLookupError:
                 pass
             except PermissionError:
@@ -211,7 +222,10 @@ class Client:
                 pass
         if self.process.returncode is None or (self.stderr_task and not self.stderr_task.done()):
             try:
-                os.killpg(self.process.pid, signal.SIGKILL)
+                if hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                else:
+                    self.process.kill()
             except ProcessLookupError:
                 pass
             except PermissionError:
@@ -251,7 +265,7 @@ async def probe(options):
         if receipt["tool_count"] == 0:
             raise ProbeError("empty_tools", "Server returned 0 tools")
 
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             apps_res = await client.request(
                 "tools/call",
                 {
@@ -260,8 +274,8 @@ async def probe(options):
                 },
             )
             if apps_res.get("isError"):
-                raise ProbeError("native_helper_unavailable", f"list_apps failed on darwin: {apps_res}")
-            receipt["darwin_list_apps_ok"] = True
+                raise ProbeError("native_helper_unavailable", f"list_apps failed on {sys.platform}: {apps_res}")
+            receipt[f"{sys.platform}_list_apps_ok"] = True
 
         if options.guard:
             result = await client.request(
@@ -289,7 +303,7 @@ async def probe(options):
         receipt["exit_code"] = client.process.returncode if client.process else None
         receipt["process_reaped"] = client.process is None or client.process.returncode is not None
         receipt["owned_process_group_remaining"] = None
-        if client.process and Path("/bin/ps").exists():
+        if client.process and os.name != "nt" and Path("/bin/ps").exists():
             try:
                 table = subprocess.check_output(["/bin/ps", "-axo", "pid=,pgid="], text=True)
                 receipt["owned_process_group_remaining"] = sum(

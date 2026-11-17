@@ -10,6 +10,7 @@ import {
 import { MCPServer } from "../packages/mcp-server/dist/index.js";
 import { MacOSAdapter } from "../packages/platform-macos/dist/index.js";
 import { WindowsAdapter } from "../packages/platform-windows/dist/index.js";
+import { LinuxAdapter } from "../packages/platform-linux/dist/index.js";
 
 test("Red Team 1: Duplicate element names trigger AmbiguousElementError and prevent blind action", async () => {
   const duplicateTree = [
@@ -67,18 +68,18 @@ test("Red Team 2: Stale State or Missing Handle throws StaleHandleError, never f
   assert.equal(payload.action_sent, false, "Must confirm action was NOT sent");
 });
 
-test("Red Team 3: Windows Adapter strictly throws UnsupportedPlatformError (Zero Fake-Success)", async () => {
-  const winAdapter = new WindowsAdapter();
-  const server = new MCPServer(winAdapter);
+test("Red Team 3: Unimplemented Linux Adapter strictly throws UnsupportedPlatformError (Zero Fake-Success)", async () => {
+  const linuxAdapter = new LinuxAdapter();
+  const server = new MCPServer(linuxAdapter);
 
-  const actions = ["click", "move_pointer", "scroll", "type_text", "set_value", "screenshot"];
+  const actions = ["click", "move_pointer", "scroll", "type_text", "screenshot"];
   for (const action of actions) {
     const res = await server.handleCallTool(action, {
       target: { type: "coordinate", x: 100, y: 100 },
       text: "hello",
     });
 
-    assert.equal(res.isError, true, `Action ${action} on Windows must fail truthfully`);
+    assert.equal(res.isError, true, `Action ${action} on Linux must fail truthfully`);
     const payload = JSON.parse(res.content[0].text);
     assert.equal(
       payload.code,
@@ -87,6 +88,26 @@ test("Red Team 3: Windows Adapter strictly throws UnsupportedPlatformError (Zero
     );
     assert.equal(payload.action_sent, false);
   }
+});
+
+test("Red Team 3b: Windows Adapter blocks background raw keystrokes with foreground_required instead of polluting active window", async () => {
+  const winAdapter = new WindowsAdapter();
+  winAdapter.runHelper = async (args) => {
+    if (args[0] === "list-apps") {
+      return [{ pid: 4242, name: "notepad", bundle_id: "notepad.exe", active: false, windows_count: 1 }];
+    }
+    throw new Error("Should not dispatch keystrokes to unfocused app: " + args.join(" "));
+  };
+  const server = new MCPServer(winAdapter);
+
+  const keyRes = await server.handleCallTool("press_key", {
+    key: "enter",
+    app_ref: { pid: 4242 },
+  });
+  assert.equal(keyRes.isError, true);
+  const keyErr = JSON.parse(keyRes.content[0].text);
+  assert.equal(keyErr.code, "foreground_required");
+  assert.equal(keyErr.action_sent, false);
 });
 
 test("Red Team 4: Unsupported tools (select_text) never return fake success", async () => {

@@ -1,7 +1,7 @@
 {
   "name": "@zov/platform-windows",
-  "version": "1.0.0",
-  "description": "Windows UI Automation (UIA) and Named Pipe adapter for Computer Use.",
+  "version": "1.1.0",
+  "description": "Native Windows UI Automation & Win32 SendInput/PrintWindow adapter for Zov Computer Use.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

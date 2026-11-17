@@ -1,8 +1,8 @@
 {
   "name": "zov-computer-use",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Zov Computer Use: Turnkey macOS Native Accessibility & CoreGraphics MCP Server + Agent Skills (Zero Focus Steal).",
+  "description": "Zov Computer Use: Turnkey macOS & Windows Native Accessibility/UIA MCP Server + Agent Skills (Zero Focus Steal).",
   "type": "module",
   "workspaces": [
     "packages/*"

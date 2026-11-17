@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
  * Package-manager-agnostic TypeScript workspace builder & self-contained bundler.
- * Works identically under pnpm or standard npm workspaces.
+ * Compiles native Swift AX helper on macOS and native C# UIA helper on Windows.
  */
 import { cpSync, chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -43,11 +43,24 @@ function findTscJs() {
   throw new Error("TypeScript compiler (tsc) not found in node_modules. Run npm install or pnpm install first.");
 }
 
+function findWindowsCsc() {
+  const windir = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
+  const candidates = [
+    join(windir, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"),
+    join(windir, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  throw new Error(
+    `Built-in .NET Framework C# compiler (csc.exe) not found under ${windir}\\Microsoft.NET. Ensure .NET Framework 4.x is enabled on Windows.`
+  );
+}
+
 const tscBin = findTscJs();
 
 for (const pkg of PACKAGES_ORDER) {
   const pkgDir = join(rootDir, "packages", pkg);
-  // Upstream packages (e.g. core) must emit .d.ts before downstream --noEmit typechecks can resolve them
   const needsEmitForDownstream =
     isTypecheck && pkg !== "cli" && !existsSync(join(pkgDir, "dist", "index.d.ts"));
   const tscArgs = isTypecheck && !needsEmitForDownstream ? ["--noEmit", "-p", pkgDir] : ["-p", pkgDir];
@@ -58,7 +71,7 @@ for (const pkg of PACKAGES_ORDER) {
 }
 
 if (!isTypecheck) {
-  // Compile native macOS Swift AX helper on Darwin; fail closed if Xcode Command Line Tools are missing
+  // 1. macOS: compile native Swift AX helper via /usr/bin/swiftc
   if (process.platform === "darwin") {
     try {
       execFileSync("/usr/bin/xcode-select", ["-p"], { stdio: "pipe" });
@@ -83,6 +96,41 @@ if (!isTypecheck) {
     chmodSync(swiftOut, 0o755);
     if (!existsSync(swiftOut)) {
       throw new Error(`Failed to produce compiled macos-ax-helper binary at ${swiftOut}`);
+    }
+  }
+
+  // 2. Windows: compile native C# UIA + Win32 helper via built-in .NET Framework csc.exe
+  if (process.platform === "win32") {
+    const cscExe = findWindowsCsc();
+    const wpfLibDir = join(dirname(cscExe), "WPF");
+    const csSrc = join(rootDir, "packages", "platform-windows", "native", "windows-uia-helper.cs");
+    const winBinDir = join(rootDir, "packages", "platform-windows", "dist", "bin");
+    const winOut = join(winBinDir, "windows-uia-helper.exe");
+    if (!existsSync(csSrc)) {
+      throw new Error(`Native Windows C# source missing at ${csSrc}`);
+    }
+    mkdirSync(winBinDir, { recursive: true });
+    execFileSync(
+      cscExe,
+      [
+        "/nologo",
+        "/optimize+",
+        "/target:exe",
+        `/out:${winOut}`,
+        `/lib:${wpfLibDir}`,
+        "/r:System.dll",
+        "/r:System.Core.dll",
+        "/r:System.Drawing.dll",
+        "/r:System.Windows.Forms.dll",
+        "/r:WindowsBase.dll",
+        "/r:UIAutomationClient.dll",
+        "/r:UIAutomationTypes.dll",
+        csSrc,
+      ],
+      { stdio: "inherit" }
+    );
+    if (!existsSync(winOut)) {
+      throw new Error(`Failed to produce compiled windows-uia-helper.exe binary at ${winOut}`);
     }
   }
 

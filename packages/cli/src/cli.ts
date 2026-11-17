@@ -31,23 +31,29 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
       }
 
+      const isWin = report.checks.os.platform === "win32";
+      const helperLabel = isWin ? "Native UIA Helper" : "Native AX Helper";
+      const wsLabel = isWin ? "Desktop Window Manager" : "WindowServer";
+      const dispLabel = isWin ? "Win32 / GDI Display" : "CoreGraphics Display";
+      const editorLabel = isWin ? "Notepad Availability" : "TextEdit Availability";
+
       console.log("\n=======================================================");
       console.log(" Zov Computer Use (CUA) Diagnostic Doctor Report");
       console.log("=======================================================\n");
 
       console.log(`[${report.checks.runtime.valid ? "PASS" : "FAIL"}] Node.js Runtime: v${report.checks.runtime.node_version} (>= 20 required)`);
       console.log(`[${report.checks.os.supported ? "PASS" : "WARN"}] Operating System: ${report.checks.os.platform} (${report.checks.os.arch})`);
-      console.log(`[${report.checks.environment.native_ax_helper ? "PASS" : "FAIL"}] Native AX Helper: ${report.checks.environment.native_ax_helper ? "Compiled & Ready" : "Missing (run npm run build on macOS)"}`);
-      console.log(`[${report.checks.permissions.accessibility ? "PASS" : "WARN"}] Accessibility Permission: ${report.checks.permissions.accessibility ? "Granted" : "Not Granted / Untrusted"}`);
-      console.log(`[${report.checks.permissions.screen_recording ? "PASS" : "WARN"}] Screen Recording Permission: ${report.checks.permissions.screen_recording ? "Granted" : "Not Granted"}`);
-      console.log(`[${report.checks.environment.gui_session ? "PASS" : "WARN"}] GUI Session: ${report.checks.environment.gui_session ? "Active Aqua Session" : "Headless / Non-interactive"}`);
-      console.log(`[${report.checks.environment.window_server ? "PASS" : "WARN"}] WindowServer: ${report.checks.environment.window_server ? "Running" : "Not detected"}`);
-      console.log(`[${report.checks.environment.coregraphics_ready ? "PASS" : "WARN"}] CoreGraphics Display: ${report.checks.environment.coregraphics_ready ? "Ready" : "Unavailable"}`);
-      console.log(`[${report.checks.environment.textedit_available ? "PASS" : "INFO"}] TextEdit Availability: ${report.checks.environment.textedit_available ? "Available (Ready for GUI E2E)" : "Not Found"}`);
+      console.log(`[${report.checks.environment.native_ax_helper ? "PASS" : "FAIL"}] ${helperLabel}: ${report.checks.environment.native_ax_helper ? "Compiled & Ready" : "Missing (run npm run build)"}`);
+      console.log(`[${report.checks.permissions.accessibility ? "PASS" : "WARN"}] Accessibility / UIA Permission: ${report.checks.permissions.accessibility ? "Granted" : "Not Granted / Untrusted"}`);
+      console.log(`[${report.checks.permissions.screen_recording ? "PASS" : "WARN"}] Screen Capture Readiness: ${report.checks.permissions.screen_recording ? "Granted" : "Not Granted"}`);
+      console.log(`[${report.checks.environment.gui_session ? "PASS" : "WARN"}] GUI Session: ${report.checks.environment.gui_session ? "Active Desktop Session" : "Headless / CI Session"}`);
+      console.log(`[${report.checks.environment.window_server ? "PASS" : "WARN"}] ${wsLabel}: ${report.checks.environment.window_server ? "Running" : "Not detected"}`);
+      console.log(`[${report.checks.environment.coregraphics_ready ? "PASS" : "WARN"}] ${dispLabel}: ${report.checks.environment.coregraphics_ready ? "Ready" : "Unavailable"}`);
+      console.log(`[${report.checks.environment.textedit_available ? "PASS" : "INFO"}] ${editorLabel}: ${report.checks.environment.textedit_available ? "Available (Ready for GUI E2E)" : "Not Found"}`);
       console.log(`[${report.checks.mcp.available ? "PASS" : "FAIL"}] MCP Tool Registry: ${report.checks.mcp.tools_count} standard tools loaded\n`);
 
       console.log(`Core Engine Status: ${report.core_ready ? "PASS (Ready for Agent automation)" : "FAIL"}`);
-      console.log(`Real GUI E2E Status: ${report.real_gui_ready ? "PASS (Ready for Real macOS GUI E2E)" : "NOT READY"}`);
+      console.log(`Real GUI E2E Status: ${report.real_gui_ready ? "PASS (Ready for Real Desktop GUI E2E)" : "NOT READY"}`);
       if (report.missing_real_gui_prereqs.length > 0) {
         console.log(`Missing Real GUI Prerequisites: ${report.missing_real_gui_prereqs.join(", ")}`);
       }
@@ -104,7 +110,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     default: {
       console.log(`
 Zov Computer Use CLI (cua) v${getCliVersion()}
-Native macOS Accessibility & CoreGraphics Computer Use runtime for AI agents.
+Native macOS (AX/CoreGraphics) & Windows (UI Automation/Win32) Computer Use runtime for AI agents.
 
 Usage:
   cua doctor [--json] [--require-real-gui] Run environment, permissions, and tool diagnostics

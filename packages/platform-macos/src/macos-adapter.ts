@@ -99,6 +99,8 @@ export class MacOSAdapter implements PlatformAdapter {
   public activeStates = new Map<string, { appRef: AppRef; tree: UIElement[] }>();
   /** @internal */
   public helperPath = resolveNativeHelperPath();
+  /** @internal */
+  public helperArgsPrefix: string[] = [];
 
   private heldMouseButtons = new Set<"left" | "right" | "middle">();
   private activeChildPids = new Set<number>();
@@ -116,9 +118,10 @@ export class MacOSAdapter implements PlatformAdapter {
     }
 
     const actionLabel = args[0] || "helper";
+    const fullArgs = [...this.helperArgsPrefix, ...args];
 
     return new Promise<T>((resolve, reject) => {
-      const child = spawn(this.helperPath, args, {
+      const child = spawn(this.helperPath, fullArgs, {
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
       });

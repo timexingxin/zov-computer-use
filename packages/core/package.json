@@ -1,6 +1,6 @@
 {
   "name": "@zov/core",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Core models, stable handles, state compression, and error taxonomy for Computer Use.",
   "type": "module",
   "main": "./dist/index.js",

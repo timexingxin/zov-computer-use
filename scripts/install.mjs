@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Turnkey Installer & Uninstaller for Zov Computer Use
+ * Turnkey Installer & Uninstaller for Zov Computer Use (macOS + Windows)
  *
  * Installs:
  * 1. Two production skills: `computer-use-orchestrator` & `zov-computer-use` (with `rpc_probe.py`)
- * 2. Self-contained native macOS Accessibility & CoreGraphics MCP Server (`@zov/mcp-server`)
+ * 2. Self-contained native macOS AX/CG or Windows UIA/Win32 MCP Server (`@zov/mcp-server`)
  * 3. Atomic non-destructive MCP configuration merge (`zov-cua`) + automatic read-only protocol & subagent guard verification.
  */
 import {
@@ -17,6 +17,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -30,12 +31,13 @@ const SKILL_NAMES = ["computer-use-orchestrator", "zov-computer-use"];
 
 function parseArgs(argv) {
   const opts = {
-    client: "auto",      // auto | antigravity | claude | cursor | all
+    client: "auto", // auto | antigravity | claude | cursor | qoder | all
     home: homedir(),
     dryRun: false,
     uninstall: false,
     skipProbe: false,
     preserveSkills: false,
+    force: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -47,17 +49,19 @@ function parseArgs(argv) {
     else if (a === "--uninstall") opts.uninstall = true;
     else if (a === "--skip-probe") opts.skipProbe = true;
     else if (a === "--preserve-skills") opts.preserveSkills = true;
+    else if (a === "--force") opts.force = true;
     else if (a === "--help" || a === "-h") {
-      console.log(`Usage: ./install.sh [options]
+      console.log(`Usage: node scripts/install.mjs [options]
 
 Options:
-  --client <auto|antigravity|claude|cursor|all>   Target AI agent client (default: auto)
-  --home <path>                                   Override target HOME directory
-  --preserve-skills                               Keep existing SKILL.md files if already customized
-  --dry-run                                       Preview actions without modifying files
-  --skip-probe                                    Skip post-install MCP stdio probe
-  --uninstall                                     Remove kit-owned skills, runtime, and MCP entries
-  -h, --help                                      Show help
+  --client <auto|antigravity|claude|cursor|qoder|all>  Target AI agent client (default: auto)
+  --home <path>                                        Override target HOME directory
+  --preserve-skills                                    Keep existing SKILL.md files if already customized
+  --dry-run                                            Preview actions without modifying files
+  --skip-probe                                         Skip post-install MCP stdio probe
+  --force                                              Allow installing on experimental OS platforms (e.g. Linux)
+  --uninstall                                          Remove kit-owned skills, runtime, and MCP entries
+  -h, --help                                           Show help
 `);
       process.exit(0);
     } else {
@@ -94,10 +98,18 @@ function resolveClientTargets(targetHome, clientOpt) {
       skillsDir: join(targetHome, ".cursor/skills"),
       mcpConfigPath: join(targetHome, ".cursor/mcp.json"),
     },
+    qoder: {
+      name: "Qoder",
+      skillsDir: join(targetHome, ".qoder/skills"),
+      mcpConfigPath: join(targetHome, ".qoder/mcp.json"),
+      secondaryMcpConfigPath: join(targetHome, ".qoder/settings.json"),
+    },
   };
 
   if (clientOpt === "all") {
-    return [definitions.antigravity, definitions.claude, definitions.cursor];
+    const base = [definitions.antigravity, definitions.claude, definitions.cursor];
+    if (existsSync(join(targetHome, ".qoder"))) base.push(definitions.qoder);
+    return base;
   }
   if (definitions[clientOpt]) {
     return [definitions[clientOpt]];
@@ -112,6 +124,7 @@ function resolveClientTargets(targetHome, clientOpt) {
     detected.push(definitions.claude);
   }
   if (existsSync(join(targetHome, ".cursor"))) detected.push(definitions.cursor);
+  if (existsSync(join(targetHome, ".qoder"))) detected.push(definitions.qoder);
 
   return detected.length > 0 ? detected : [definitions.antigravity];
 }
@@ -142,8 +155,12 @@ function loadJsonSafe(path, dryRun = false) {
 
 function writeJsonAtomic(path, data) {
   mkdirSync(dirname(path), { recursive: true });
+  const existingMode = existsSync(path) ? statSync(path).mode & 0o777 : null;
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  if (existingMode !== null && process.platform !== "win32") {
+    chmodSync(tmpPath, existingMode);
+  }
   renameSync(tmpPath, path);
 }
 
@@ -151,7 +168,14 @@ function backupIfExists(path, dryRun) {
   if (!existsSync(path)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const bak = `${path}.bak-${stamp}`;
-  if (!dryRun) copyFileSync(path, bak);
+  if (!dryRun) {
+    copyFileSync(path, bak);
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(bak, statSync(path).mode & 0o777);
+      } catch {}
+    }
+  }
   return bak;
 }
 
@@ -175,18 +199,58 @@ function shouldBackupSkillDir(destSkill, templateDir) {
   return false;
 }
 
-function verifyPython3Available() {
-  try {
-    execFileSync("python3", ["-c", "import sys; assert sys.version_info >= (3, 9)"], { stdio: "pipe" });
-  } catch {
-    throw new Error(
-      "Python 3.9+ is required to run rpc_probe.py (run 'xcode-select --install' on macOS, or pass '--skip-probe')."
-    );
+function resolvePythonRunner() {
+  const candidates =
+    process.platform === "win32"
+      ? [
+          { bin: "python", prefixArgs: [] },
+          { bin: "py", prefixArgs: ["-3"] },
+          { bin: "python3", prefixArgs: [] },
+        ]
+      : [
+          { bin: "python3", prefixArgs: [] },
+          { bin: "python", prefixArgs: [] },
+        ];
+
+  for (const c of candidates) {
+    try {
+      execFileSync(c.bin, [...c.prefixArgs, "-c", "import sys; assert sys.version_info >= (3, 9)"], {
+        stdio: "pipe",
+      });
+      return c;
+    } catch {}
   }
+  throw new Error(
+    "Python 3.9+ is required to run rpc_probe.py (install Python 3.9+ or pass '--skip-probe')."
+  );
+}
+
+function expectedNativeHelperPath(baseDir) {
+  if (process.platform === "darwin") {
+    return join(baseDir, "node_modules", "@zov", "platform-macos", "dist", "bin", "macos-ax-helper");
+  }
+  if (process.platform === "win32") {
+    return join(baseDir, "node_modules", "@zov", "platform-windows", "dist", "bin", "windows-uia-helper.exe");
+  }
+  return null;
 }
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
+  const isCustomSandboxHome = resolve(opts.home) !== resolve(homedir());
+  if (
+    !opts.uninstall &&
+    !opts.dryRun &&
+    !opts.force &&
+    !isCustomSandboxHome &&
+    process.platform !== "darwin" &&
+    process.platform !== "win32"
+  ) {
+    throw new Error(
+      `Native GUI backend is currently verified for macOS (darwin) and Windows (win32); current platform is '${process.platform}'. Pass --force or --home <sandbox> to install anyway.`
+    );
+  }
+
   const kitHome = join(opts.home, ".local/share/zov-computer-use");
   const runtimeTarget = join(kitHome, "runtime");
   const nodeBin = process.execPath;
@@ -197,6 +261,9 @@ function main() {
   for (const t of targets) {
     if (existsSync(t.mcpConfigPath)) {
       loadJsonSafe(t.mcpConfigPath, opts.dryRun);
+    }
+    if (t.secondaryMcpConfigPath && existsSync(t.secondaryMcpConfigPath)) {
+      loadJsonSafe(t.secondaryMcpConfigPath, opts.dryRun);
     }
   }
 
@@ -214,16 +281,18 @@ function main() {
           }
         }
       }
-      if (existsSync(t.mcpConfigPath)) {
-        const cfg = loadJsonSafe(t.mcpConfigPath, opts.dryRun);
-        if (cfg.mcpServers && typeof cfg.mcpServers === "object") {
-          const entry = cfg.mcpServers["zov-cua"];
-          if (entry && JSON.stringify(entry).includes("zov-computer-use")) {
-            delete cfg.mcpServers["zov-cua"];
-            console.log(`[remove] MCP server 'zov-cua' from ${t.mcpConfigPath}`);
-            if (!opts.dryRun) {
-              backupIfExists(t.mcpConfigPath, opts.dryRun);
-              writeJsonAtomic(t.mcpConfigPath, cfg);
+      for (const cfgPath of [t.mcpConfigPath, t.secondaryMcpConfigPath].filter(Boolean)) {
+        if (existsSync(cfgPath)) {
+          const cfg = loadJsonSafe(cfgPath, opts.dryRun);
+          if (cfg.mcpServers && typeof cfg.mcpServers === "object") {
+            const entry = cfg.mcpServers["zov-cua"];
+            if (entry && JSON.stringify(entry).includes("zov-computer-use")) {
+              delete cfg.mcpServers["zov-cua"];
+              console.log(`[remove] MCP server 'zov-cua' from ${cfgPath}`);
+              if (!opts.dryRun) {
+                backupIfExists(cfgPath, opts.dryRun);
+                writeJsonAtomic(cfgPath, cfg);
+              }
             }
           }
         }
@@ -237,24 +306,12 @@ function main() {
     return;
   }
 
-  if (!opts.dryRun && !opts.skipProbe) {
-    verifyPython3Available();
-  }
+  const pyRunner = !opts.dryRun && !opts.skipProbe ? resolvePythonRunner() : null;
 
-  // Ensure built runtime exists (including compiled macos-ax-helper on Darwin)
+  // Ensure built runtime exists (including compiled native helper on Darwin / Win32)
   const builtRuntime = join(rootDir, "dist", "runtime", "dist", "bin", "server.js");
-  const builtHelper = join(
-    rootDir,
-    "dist",
-    "runtime",
-    "node_modules",
-    "@zov",
-    "platform-macos",
-    "dist",
-    "bin",
-    "macos-ax-helper"
-  );
-  if (!existsSync(builtRuntime) || (process.platform === "darwin" && !existsSync(builtHelper))) {
+  const builtHelper = expectedNativeHelperPath(join(rootDir, "dist", "runtime"));
+  if (!existsSync(builtRuntime) || (builtHelper && !existsSync(builtHelper))) {
     console.log("[setup] Building workspace packages first...");
     if (!opts.dryRun) {
       execFileSync(process.execPath, [join(rootDir, "scripts", "build-all.mjs")], {
@@ -264,9 +321,14 @@ function main() {
     }
   }
 
+  const backendDesc =
+    process.platform === "win32"
+      ? "Native Windows UI Automation + Win32 MCP (@zov/mcp-server)"
+      : "Native macOS AX + CoreGraphics MCP (@zov/mcp-server)";
+
   console.log("====================================================");
   console.log(" Installing Zov Computer Use");
-  console.log(" Backend      : Native macOS AX + CoreGraphics MCP (@zov/mcp-server)");
+  console.log(` Backend      : ${backendDesc}`);
   console.log(` Targets      : ${targets.map((t) => t.name).join(", ")}`);
   console.log("====================================================");
 
@@ -275,18 +337,12 @@ function main() {
     rmSync(runtimeTarget, { recursive: true, force: true });
     mkdirSync(runtimeTarget, { recursive: true });
     cpSync(join(rootDir, "dist", "runtime"), runtimeTarget, { recursive: true });
-    chmodSync(join(runtimeTarget, "dist", "bin", "server.js"), 0o755);
-    const installedHelper = join(
-      runtimeTarget,
-      "node_modules",
-      "@zov",
-      "platform-macos",
-      "dist",
-      "bin",
-      "macos-ax-helper"
-    );
-    if (existsSync(installedHelper)) {
-      chmodSync(installedHelper, 0o755);
+    if (process.platform !== "win32") {
+      chmodSync(join(runtimeTarget, "dist", "bin", "server.js"), 0o755);
+      const installedHelper = expectedNativeHelperPath(runtimeTarget);
+      if (installedHelper && existsSync(installedHelper)) {
+        chmodSync(installedHelper, 0o755);
+      }
     }
   }
   console.log(`[1/3] Installed self-contained MCP runtime -> ${kitHome}`);
@@ -331,7 +387,9 @@ function main() {
         );
       }
       const probeScript = join(t.skillsDir, "zov-computer-use", "scripts", "rpc_probe.py");
-      if (existsSync(probeScript)) chmodSync(probeScript, 0o755);
+      if (existsSync(probeScript) && process.platform !== "win32") {
+        chmodSync(probeScript, 0o755);
+      }
     }
     console.log(`[2/3] Installed skills (computer-use-orchestrator, zov-computer-use) -> ${t.skillsDir}`);
 
@@ -339,7 +397,12 @@ function main() {
     if (!cfg.mcpServers || typeof cfg.mcpServers !== "object" || Array.isArray(cfg.mcpServers)) {
       cfg.mcpServers = {};
     }
-    cfg.mcpServers["zov-cua"] = serverEntry;
+    cfg.mcpServers["zov-cua"] =
+      t.name === "Claude Code"
+        ? { type: "stdio", ...serverEntry }
+        : t.name === "Qoder"
+          ? { ...serverEntry, timeout: 90000, disabled: false }
+          : serverEntry;
 
     if (!opts.dryRun) {
       const bak = backupIfExists(t.mcpConfigPath, opts.dryRun);
@@ -347,10 +410,24 @@ function main() {
       writeJsonAtomic(t.mcpConfigPath, cfg);
     }
     console.log(`      Updated MCP config -> ${t.mcpConfigPath}`);
+
+    if (t.secondaryMcpConfigPath && existsSync(t.secondaryMcpConfigPath)) {
+      const secCfg = loadJsonSafe(t.secondaryMcpConfigPath, opts.dryRun);
+      if (!secCfg.mcpServers || typeof secCfg.mcpServers !== "object" || Array.isArray(secCfg.mcpServers)) {
+        secCfg.mcpServers = {};
+      }
+      secCfg.mcpServers["zov-cua"] = { ...serverEntry, timeout: 90000, disabled: false };
+      if (!opts.dryRun) {
+        const secBak = backupIfExists(t.secondaryMcpConfigPath, opts.dryRun);
+        if (secBak) console.log(`      Backed up secondary config -> ${secBak}`);
+        writeJsonAtomic(t.secondaryMcpConfigPath, secCfg);
+      }
+      console.log(`      Updated secondary MCP config -> ${t.secondaryMcpConfigPath}`);
+    }
   }
 
   // 3. Run read-only MCP handshake, helper binary smoke check & subagent guard probe
-  if (!opts.dryRun && !opts.skipProbe) {
+  if (!opts.dryRun && !opts.skipProbe && pyRunner) {
     const primaryTarget = targets[0];
     let probePy = join(primaryTarget.skillsDir, "zov-computer-use", "scripts", "rpc_probe.py");
     if (!existsSync(probePy)) {
@@ -358,10 +435,10 @@ function main() {
     }
     console.log("[3/3] Verifying MCP stdio handshake, native helper readiness & subagent safety guard...");
     execFileSync(
-      "python3",
-      [probePy, "--config", primaryTarget.mcpConfigPath, "--server", "zov-cua", "--guard"],
+      pyRunner.bin,
+      [...pyRunner.prefixArgs, probePy, "--config", primaryTarget.mcpConfigPath, "--server", "zov-cua", "--guard"],
       {
-        env: { ...process.env, HOME: opts.home },
+        env: { ...process.env, HOME: opts.home, USERPROFILE: opts.home },
         stdio: "inherit",
       }
     );
@@ -370,8 +447,12 @@ function main() {
   }
 
   console.log("\n[SUCCESS] Zov Computer Use is ready.");
-  console.log("Next step on macOS: Ensure your terminal / agent app has Accessibility permission enabled in:");
-  console.log("  System Settings -> Privacy & Security -> Accessibility");
+  if (process.platform === "darwin") {
+    console.log("Next step on macOS: Ensure your terminal / agent app has Accessibility permission enabled in:");
+    console.log("  System Settings -> Privacy & Security -> Accessibility");
+  } else if (process.platform === "win32") {
+    console.log("Next step on Windows: Restart your agent client to load the zov-cua MCP server.");
+  }
 }
 
 main();

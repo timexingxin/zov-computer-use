@@ -94,6 +94,8 @@ const VALID_MODIFIERS = new Set([
   "command",
   "meta",
   "super",
+  "win",
+  "windows",
   "ctrl",
   "control",
   "alt",
@@ -412,10 +414,7 @@ export class MCPServer {
       throw new UnsupportedPlatformError("select_text", this.adapter.platform);
     }
 
-    if (
-      (this.adapter.platform === "win32" || this.adapter.platform === "linux") &&
-      !PLATFORM_AGNOSTIC_TOOLS.has(name)
-    ) {
+    if (this.adapter.platform === "linux" && !PLATFORM_AGNOSTIC_TOOLS.has(name)) {
       throw new UnsupportedPlatformError(name, this.adapter.platform);
     }
 

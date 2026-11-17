@@ -32,6 +32,9 @@ test("CLI --help includes dynamic version header", async () => {
 
 test("Root cua script --version executes successfully via npm/pnpm", async () => {
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const res = await execFile(npmCmd, ["run", "--silent", "cua", "--", "--version"], { cwd: repoRoot });
+  const res = await execFile(npmCmd, ["run", "--silent", "cua", "--", "--version"], {
+    cwd: repoRoot,
+    shell: process.platform === "win32",
+  });
   assert.ok(res.stdout.includes(`zov-computer-use v${expectedVersion}`));
 });

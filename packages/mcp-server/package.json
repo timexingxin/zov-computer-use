@@ -1,6 +1,6 @@
 {
   "name": "@zov/mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Model Context Protocol (MCP) server for local-first desktop automation.",
   "type": "module",
   "main": "./dist/index.js",

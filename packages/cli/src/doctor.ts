@@ -41,9 +41,11 @@ export interface DoctorReport {
 export async function runDoctor(customAdapter?: PlatformAdapter): Promise<DoctorReport> {
   const adapter = customAdapter || createPlatformAdapter();
   const isDarwin = adapter.platform === "darwin";
+  const isWin32 = adapter.platform === "win32";
 
   const helperPath = typeof (adapter as any).helperPath === "string" ? (adapter as any).helperPath : undefined;
-  const nativeAxHelperReady = isDarwin ? Boolean(helperPath && existsSync(helperPath)) : true;
+  const nativeAxHelperReady =
+    isDarwin || isWin32 ? Boolean(helperPath && existsSync(helperPath)) : false;
 
   const perms = nativeAxHelperReady
     ? await adapter.checkPermissions().catch(() => ({
@@ -55,7 +57,7 @@ export async function runDoctor(customAdapter?: PlatformAdapter): Promise<Doctor
   let windowServerAlive = false;
   let guiSessionActive = false;
   let coregraphicsReady = false;
-  let texteditAvailable = false;
+  let editorAvailable = false;
 
   if (process.platform === "darwin" && isDarwin) {
     try {
@@ -82,29 +84,51 @@ export async function runDoctor(customAdapter?: PlatformAdapter): Promise<Doctor
         "/Applications/TextEdit.app",
         join(homedir(), "Applications/TextEdit.app"),
       ];
-      texteditAvailable = textEditCandidates.some((p) => existsSync(p));
+      editorAvailable = textEditCandidates.some((p) => existsSync(p));
     } catch {}
-  } else {
-    guiSessionActive = !process.env.CI && !process.env.GITHUB_ACTIONS;
-    coregraphicsReady = true;
+  } else if (process.platform === "win32" && isWin32) {
+    try {
+      if (nativeAxHelperReady) {
+        const screenInfo = await adapter.getScreenInfo?.().catch(() => null);
+        coregraphicsReady = Boolean(
+          screenInfo && screenInfo.main_display.width > 0 && screenInfo.main_display.height > 0
+        );
+        windowServerAlive = coregraphicsReady;
+      }
+      guiSessionActive =
+        windowServerAlive &&
+        coregraphicsReady &&
+        !process.env.CI &&
+        !process.env.GITHUB_ACTIONS;
+
+      const windir = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
+      const notepadCandidates = [
+        join(windir, "System32", "notepad.exe"),
+        join(windir, "notepad.exe"),
+      ];
+      editorAvailable = notepadCandidates.some((p) => existsSync(p));
+    } catch {}
   }
 
   const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
   const runtimeValid = nodeMajor >= 20;
-  const osSupported = ["darwin", "win32", "linux"].includes(process.platform);
+  const osSupported = ["darwin", "win32"].includes(process.platform);
   const mcpValid = TOOLS_MANIFEST.length >= 47;
 
-  const coreReady = runtimeValid && osSupported && mcpValid && nativeAxHelperReady;
+  const coreReady =
+    runtimeValid &&
+    mcpValid &&
+    (["darwin", "win32"].includes(process.platform) ? nativeAxHelperReady : true);
 
   const missingRealGui: string[] = [];
-  if (process.platform !== "darwin") missingRealGui.push("darwin");
+  if (!osSupported) missingRealGui.push("supported_desktop_os");
   if (!nativeAxHelperReady) missingRealGui.push("native_ax_helper");
   if (!guiSessionActive) missingRealGui.push("interactive_gui");
   if (!windowServerAlive) missingRealGui.push("window_server");
   if (!perms.accessibility) missingRealGui.push("accessibility");
   if (!perms.screen_recording) missingRealGui.push("screen_recording");
-  if (!coregraphicsReady) missingRealGui.push("coregraphics");
-  if (!texteditAvailable) missingRealGui.push("textedit");
+  if (!coregraphicsReady) missingRealGui.push(isWin32 ? "display_gdi" : "coregraphics");
+  if (!editorAvailable) missingRealGui.push(isWin32 ? "notepad" : "textedit");
 
   const realGuiReady = coreReady && missingRealGui.length === 0;
 
@@ -133,7 +157,7 @@ export async function runDoctor(customAdapter?: PlatformAdapter): Promise<Doctor
         gui_session: guiSessionActive,
         window_server: windowServerAlive,
         coregraphics_ready: coregraphicsReady,
-        textedit_available: texteditAvailable,
+        textedit_available: editorAvailable,
       },
       mcp: {
         tools_count: TOOLS_MANIFEST.length,

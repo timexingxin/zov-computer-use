@@ -1,6 +1,6 @@
 {
   "name": "@zov/platform-macos",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "macOS native Accessibility (AX) and CoreGraphics adapter for Computer Use.",
   "type": "module",
   "main": "./dist/index.js",
