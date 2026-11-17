@@ -23,9 +23,9 @@ test("macOS Real GUI E2E: TextEdit observe -> act -> save -> file changed", { ti
 
   const adapter = new MacOSAdapter();
   const server = new MCPServer(adapter);
-  const testToken = `ZCODE_VERIFY_${Date.now()}`;
-  const initialText = `ZCODE_INITIAL_${Date.now()}`;
-  const testDir = await mkdtemp(join(tmpdir(), "zcode-textedit-e2e-"));
+  const testToken = `ZOV_VERIFY_${Date.now()}`;
+  const initialText = `ZOV_INITIAL_${Date.now()}`;
+  const testDir = await mkdtemp(join(tmpdir(), "zov-textedit-e2e-"));
   const testFile = join(testDir, `${testToken}.txt`);
   const testName = basename(testFile);
   let saved = false;

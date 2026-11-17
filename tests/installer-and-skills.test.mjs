@@ -14,7 +14,7 @@ test("Subagent metadata guard returns SUBAGENT_COMPUTER_USE_UNAVAILABLE", async 
   const res = await server.handleCallTool(
     "request_access",
     {},
-    { "com.zcode/request-context": { runtime_scope: "subagent" } }
+    { "com.zov/request-context": { runtime_scope: "subagent" } }
   );
   assert.equal(res.isError, true);
   assert.equal(res.structuredContent?.code, "SUBAGENT_COMPUTER_USE_UNAVAILABLE");
@@ -65,10 +65,9 @@ test("Atomic return_state='compact' refreshes state in a single roundtrip", asyn
   assert.equal(clickPayload.compact_state?.state_id, "s_atomic_2");
 });
 
-test("Turnkey installer deploys skills, open-source MCP runtime, runs live stdio probe, and uninstalls cleanly", () => {
-  const fakeHome = mkdtempSync(join(tmpdir(), "macos-cua-kit-e2e-"));
+test("Turnkey installer deploys zov-computer-use skills, native MCP runtime, runs live stdio probe, and uninstalls cleanly", () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "zov-cua-e2e-"));
   try {
-    // Seed an existing MCP server to ensure non-destructive config merge
     const agyConfigDir = join(fakeHome, ".gemini", "config");
     mkdirSync(agyConfigDir, { recursive: true });
     const mcpCfgPath = join(agyConfigDir, "mcp_config.json");
@@ -86,26 +85,23 @@ test("Turnkey installer deploys skills, open-source MCP runtime, runs live stdio
       "utf-8"
     );
 
-    // 1. Run full turnkey install (including real Python stdio rpc_probe.py --guard!)
     const out = execFileSync(
       process.execPath,
-      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "all", "--mode", "open"],
+      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "all"],
       { cwd: repoRoot, encoding: "utf-8" }
     );
     assert.match(out, /"status":\s*"PASS"/, "Live rpc_probe.py handshake + guard must PASS");
 
-    // 2. Verify skills and merged config
     assert.ok(existsSync(join(agyConfigDir, "skills", "computer-use-orchestrator", "SKILL.md")));
-    assert.ok(existsSync(join(agyConfigDir, "skills", "zcode-computer-use", "SKILL.md")));
-    assert.ok(existsSync(join(agyConfigDir, "skills", "zcode-computer-use", "scripts", "rpc_probe.py")));
+    assert.ok(existsSync(join(agyConfigDir, "skills", "zov-computer-use", "SKILL.md")));
+    assert.ok(existsSync(join(agyConfigDir, "skills", "zov-computer-use", "scripts", "rpc_probe.py")));
     assert.ok(existsSync(join(fakeHome, ".claude", "skills", "computer-use-orchestrator", "SKILL.md")));
-    assert.ok(existsSync(join(fakeHome, ".cursor", "skills", "zcode-computer-use", "SKILL.md")));
+    assert.ok(existsSync(join(fakeHome, ".cursor", "skills", "zov-computer-use", "SKILL.md")));
 
     const mergedCfg = JSON.parse(readFileSync(mcpCfgPath, "utf-8"));
     assert.deepEqual(mergedCfg.mcpServers["existing-user-server"], { command: "echo", args: ["keep-me"] });
-    assert.ok(mergedCfg.mcpServers["zcode-cua"], "zcode-cua server must be registered");
+    assert.ok(mergedCfg.mcpServers["zov-cua"], "zov-cua server must be registered");
 
-    // 3. Verify clean uninstall preserves user's pre-existing servers
     execFileSync(
       process.execPath,
       [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "all", "--uninstall"],
@@ -113,52 +109,34 @@ test("Turnkey installer deploys skills, open-source MCP runtime, runs live stdio
     );
 
     assert.equal(existsSync(join(agyConfigDir, "skills", "computer-use-orchestrator")), false);
-    assert.equal(existsSync(join(agyConfigDir, "skills", "zcode-computer-use")), false);
+    assert.equal(existsSync(join(agyConfigDir, "skills", "zov-computer-use")), false);
     const afterUninstallCfg = JSON.parse(readFileSync(mcpCfgPath, "utf-8"));
-    assert.equal(afterUninstallCfg.mcpServers["zcode-cua"], undefined);
+    assert.equal(afterUninstallCfg.mcpServers["zov-cua"], undefined);
     assert.deepEqual(afterUninstallCfg.mcpServers["existing-user-server"], { command: "echo", args: ["keep-me"] });
   } finally {
     rmSync(fakeHome, { recursive: true, force: true });
   }
 });
 
-test("Installer auto-selects open mode on ZCode >= 3.18.0 and honors --preserve-skills", () => {
-  const fakeHome = mkdtempSync(join(tmpdir(), "macos-cua-kit-v318-"));
+test("Installer honors --preserve-skills without overwriting customized SKILL.md", () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "zov-cua-preserve-"));
   try {
-    // Simulate ZCode 3.18.2 helper metadata + legacy cached 0.5.14 plugin + stale visible bridge
-    const zcodeMetaDir = join(fakeHome, ".zcode", "computer-use");
-    const zcodePluginDir = join(fakeHome, ".zcode", "cli", "plugins", "cache", "zcode-plugins-official", "computer-use", "0.5.14", "dist", "mcp");
-    mkdirSync(zcodeMetaDir, { recursive: true });
-    mkdirSync(zcodePluginDir, { recursive: true });
-    writeFileSync(join(zcodeMetaDir, ".zcode-cua-helper-meta.json"), JSON.stringify({ version: "3.18.2" }), "utf-8");
-    writeFileSync(join(zcodePluginDir, "server.js"), "// legacy", "utf-8");
-
-    const agySkillsDir = join(fakeHome, ".gemini", "config", "skills", "zcode-computer-use");
+    const agySkillsDir = join(fakeHome, ".gemini", "config", "skills", "zov-computer-use");
     mkdirSync(agySkillsDir, { recursive: true });
-    const customSkillText = "---\nname: zcode-computer-use\ndescription: Custom\n---\nCUSTOM_USER_RULES";
+    const customSkillText = "---\nname: zov-computer-use\ndescription: Custom\n---\nCUSTOM_USER_RULES";
     writeFileSync(join(agySkillsDir, "SKILL.md"), customSkillText, "utf-8");
 
     const mcpCfgPath = join(fakeHome, ".gemini", "config", "mcp_config.json");
-    writeFileSync(
-      mcpCfgPath,
-      JSON.stringify({
-        mcpServers: {
-          "zcode-cua-visible": { command: "node", args: ["/old/zcode-cua-visible-bridge.mjs"] },
-        },
-      }),
-      "utf-8"
-    );
+    writeFileSync(mcpCfgPath, "{}", "utf-8");
 
-    const out = execFileSync(
+    execFileSync(
       process.execPath,
-      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--mode", "auto", "--preserve-skills", "--skip-probe"],
+      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--preserve-skills", "--skip-probe"],
       { cwd: repoRoot, encoding: "utf-8" }
     );
-    assert.match(out, /Backend Mode : open/);
 
     const updatedCfg = JSON.parse(readFileSync(mcpCfgPath, "utf-8"));
-    assert.ok(updatedCfg.mcpServers["zcode-cua"].args[0].endsWith("runtime/dist/bin/server.js"));
-    assert.equal(updatedCfg.mcpServers["zcode-cua-visible"], undefined, "Stale visible bridge must be pruned");
+    assert.ok(updatedCfg.mcpServers["zov-cua"].args[0].endsWith("runtime/dist/bin/server.js"));
     assert.equal(readFileSync(join(agySkillsDir, "SKILL.md"), "utf-8"), customSkillText, "Custom SKILL.md must be preserved");
   } finally {
     rmSync(fakeHome, { recursive: true, force: true });

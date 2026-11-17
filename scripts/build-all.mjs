@@ -94,7 +94,7 @@ if (!isTypecheck) {
   // Assemble self-contained portable runtime in dist/runtime (zero external dependencies)
   const runtimeDir = join(rootDir, "dist", "runtime");
   const runtimeDist = join(runtimeDir, "dist");
-  const runtimeModules = join(runtimeDir, "node_modules", "@zcode-community");
+  const runtimeModules = join(runtimeDir, "node_modules", "@zov");
 
   rmSync(runtimeDir, { recursive: true, force: true });
   mkdirSync(runtimeDist, { recursive: true });

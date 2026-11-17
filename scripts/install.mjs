@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 /**
- * Turnkey Installer & Uninstaller for macOS Computer Use Kit
+ * Turnkey Installer & Uninstaller for Zov Computer Use
  *
  * Installs:
- * 1. Two production skills: `computer-use-orchestrator` & `zcode-computer-use` (with `rpc_probe.py`)
- * 2. Self-contained open-source macOS AX MCP Server (`@zcode-community/mcp-server`)
- * 3. Optional ZCode Native Helper bridges (`zcode-cua-bridge.mjs` & `zcode-cua-visible-bridge.mjs`)
- * 4. Atomic non-destructive MCP configuration merge + automatic read-only protocol & subagent guard verification.
+ * 1. Two production skills: `computer-use-orchestrator` & `zov-computer-use` (with `rpc_probe.py`)
+ * 2. Self-contained native macOS Accessibility & CoreGraphics MCP Server (`@zov/mcp-server`)
+ * 3. Atomic non-destructive MCP configuration merge (`zov-cua`) + automatic read-only protocol & subagent guard verification.
  */
 import {
   chmodSync,
@@ -18,7 +17,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -28,11 +26,11 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const KIT_OWNERSHIP_MARKER = ".kit-owned.json";
+const SKILL_NAMES = ["computer-use-orchestrator", "zov-computer-use"];
 
 function parseArgs(argv) {
   const opts = {
     client: "auto",      // auto | antigravity | claude | cursor | all
-    mode: "auto",        // auto | open | zcode | both
     home: homedir(),
     dryRun: false,
     uninstall: false,
@@ -43,8 +41,6 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--client" && argv[i + 1]) opts.client = argv[++i];
     else if (a.startsWith("--client=")) opts.client = a.split("=")[1];
-    else if (a === "--mode" && argv[i + 1]) opts.mode = argv[++i];
-    else if (a.startsWith("--mode=")) opts.mode = a.split("=")[1];
     else if (a === "--home" && argv[i + 1]) opts.home = resolve(argv[++i]);
     else if (a.startsWith("--home=")) opts.home = resolve(a.split("=")[1]);
     else if (a === "--dry-run") opts.dryRun = true;
@@ -56,7 +52,6 @@ function parseArgs(argv) {
 
 Options:
   --client <auto|antigravity|claude|cursor|all>   Target AI agent client (default: auto)
-  --mode <auto|open|zcode|both>                   Backend mode (default: auto -> open native AX)
   --home <path>                                   Override target HOME directory
   --preserve-skills                               Keep existing SKILL.md files if already customized
   --dry-run                                       Preview actions without modifying files
@@ -70,39 +65,6 @@ Options:
     }
   }
   return opts;
-}
-
-function hasZCodeInstallation(targetHome) {
-  const appCandidates = [
-    "/Applications/ZCode.app/Contents/MacOS/ZCode",
-    join(targetHome, "Applications/ZCode.app/Contents/MacOS/ZCode"),
-  ];
-  const hasApp = appCandidates.some((p) => existsSync(p));
-  const cacheDir = join(targetHome, ".zcode/cli/plugins/cache/zcode-plugins-official/computer-use");
-  if (!hasApp || !existsSync(cacheDir)) return false;
-
-  // ZCode >= 3.18.0 blocks external ELECTRON_RUN_AS_NODE bridge connections via verifyPeer.
-  const helperMetaPath = join(targetHome, ".zcode/computer-use/.zcode-cua-helper-meta.json");
-  if (existsSync(helperMetaPath)) {
-    try {
-      const meta = JSON.parse(readFileSync(helperMetaPath, "utf-8"));
-      const [maj = 0, min = 0] = String(meta.version || "0.0.0").split(".").map(Number);
-      if (maj > 3 || (maj === 3 && min >= 18)) {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-  }
-
-  try {
-    return readdirSync(cacheDir).some((v) => {
-      const p = join(cacheDir, v, "dist/mcp/server.js");
-      return statSync(join(cacheDir, v)).isDirectory() && existsSync(p);
-    });
-  } catch {
-    return false;
-  }
 }
 
 function resolveClientTargets(targetHome, clientOpt) {
@@ -196,7 +158,6 @@ function backupIfExists(path, dryRun) {
 function shouldBackupSkillDir(destSkill, templateDir) {
   if (!existsSync(destSkill)) return false;
   if (!existsSync(join(destSkill, KIT_OWNERSHIP_MARKER))) {
-    // Pre-existing user skill directory without kit ownership marker
     return true;
   }
   const destMd = join(destSkill, "SKILL.md");
@@ -206,7 +167,6 @@ function shouldBackupSkillDir(destSkill, templateDir) {
       return true;
     }
   }
-  // Also preserve if user placed extra files inside the skill directory
   const entries = readdirSync(destSkill).filter((n) => n !== KIT_OWNERSHIP_MARKER);
   const tplEntries = readdirSync(templateDir);
   if (entries.some((e) => !tplEntries.includes(e))) {
@@ -227,9 +187,8 @@ function verifyPython3Available() {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const kitHome = join(opts.home, ".local/share/macos-computer-use-kit");
+  const kitHome = join(opts.home, ".local/share/zov-computer-use");
   const runtimeTarget = join(kitHome, "runtime");
-  const bridgesTarget = join(kitHome, "bridges");
   const nodeBin = process.execPath;
 
   const targets = resolveClientTargets(opts.home, opts.client);
@@ -242,9 +201,9 @@ function main() {
   }
 
   if (opts.uninstall) {
-    console.log("=== Uninstalling macOS Computer Use Kit ===");
+    console.log("=== Uninstalling Zov Computer Use ===");
     for (const t of targets) {
-      for (const skillName of ["computer-use-orchestrator", "zcode-computer-use"]) {
+      for (const skillName of SKILL_NAMES) {
         const sPath = join(t.skillsDir, skillName);
         if (existsSync(sPath)) {
           if (existsSync(join(sPath, KIT_OWNERSHIP_MARKER))) {
@@ -258,18 +217,14 @@ function main() {
       if (existsSync(t.mcpConfigPath)) {
         const cfg = loadJsonSafe(t.mcpConfigPath, opts.dryRun);
         if (cfg.mcpServers && typeof cfg.mcpServers === "object") {
-          let modified = false;
-          for (const key of ["zcode-cua", "zcode-cua-visible", "cua-open"]) {
-            const entry = cfg.mcpServers[key];
-            if (entry && JSON.stringify(entry).includes("macos-computer-use-kit")) {
-              delete cfg.mcpServers[key];
-              modified = true;
-              console.log(`[remove] MCP server '${key}' from ${t.mcpConfigPath}`);
+          const entry = cfg.mcpServers["zov-cua"];
+          if (entry && JSON.stringify(entry).includes("zov-computer-use")) {
+            delete cfg.mcpServers["zov-cua"];
+            console.log(`[remove] MCP server 'zov-cua' from ${t.mcpConfigPath}`);
+            if (!opts.dryRun) {
+              backupIfExists(t.mcpConfigPath, opts.dryRun);
+              writeJsonAtomic(t.mcpConfigPath, cfg);
             }
-          }
-          if (modified && !opts.dryRun) {
-            backupIfExists(t.mcpConfigPath, opts.dryRun);
-            writeJsonAtomic(t.mcpConfigPath, cfg);
           }
         }
       }
@@ -293,7 +248,7 @@ function main() {
     "dist",
     "runtime",
     "node_modules",
-    "@zcode-community",
+    "@zov",
     "platform-macos",
     "dist",
     "bin",
@@ -309,25 +264,13 @@ function main() {
     }
   }
 
-  const zcodeAvailable = hasZCodeInstallation(opts.home);
-  let effectiveMode = opts.mode;
-  if (effectiveMode === "auto") {
-    effectiveMode = zcodeAvailable ? "both" : "open";
-  }
-  if ((effectiveMode === "zcode" || effectiveMode === "both") && !zcodeAvailable) {
-    console.warn(
-      "[warn] Compatible local ZCode CUA helper not detected; falling back to pure open-source 'open' mode."
-    );
-    effectiveMode = "open";
-  }
-
   console.log("====================================================");
-  console.log(" Installing macOS Computer Use Kit");
-  console.log(` Backend Mode : ${effectiveMode} (${effectiveMode === "open" ? "Built-in Open-Source macOS AX MCP" : "ZCode Native Bridges + Open-Source AX Fallback"})`);
+  console.log(" Installing Zov Computer Use");
+  console.log(" Backend      : Native macOS AX + CoreGraphics MCP (@zov/mcp-server)");
   console.log(` Targets      : ${targets.map((t) => t.name).join(", ")}`);
   console.log("====================================================");
 
-  // 1. Install runtime & bridges
+  // 1. Install self-contained runtime
   if (!opts.dryRun) {
     rmSync(runtimeTarget, { recursive: true, force: true });
     mkdirSync(runtimeTarget, { recursive: true });
@@ -336,7 +279,7 @@ function main() {
     const installedHelper = join(
       runtimeTarget,
       "node_modules",
-      "@zcode-community",
+      "@zov",
       "platform-macos",
       "dist",
       "bin",
@@ -345,34 +288,19 @@ function main() {
     if (existsSync(installedHelper)) {
       chmodSync(installedHelper, 0o755);
     }
-
-    mkdirSync(bridgesTarget, { recursive: true });
-    for (const b of ["zcode-cua-bridge.mjs", "zcode-cua-visible-bridge.mjs"]) {
-      const dest = join(bridgesTarget, b);
-      cpSync(join(rootDir, "bridges", b), dest);
-      chmodSync(dest, 0o755);
-    }
   }
-  console.log(`[1/3] Installed self-contained MCP runtime & bridges -> ${kitHome}`);
+  console.log(`[1/3] Installed self-contained MCP runtime -> ${kitHome}`);
 
-  const openServerEntry = {
+  const serverEntry = {
     command: nodeBin,
     args: [join(runtimeTarget, "dist", "bin", "server.js")],
-  };
-  const zcodeBridgeEntry = {
-    command: nodeBin,
-    args: [join(bridgesTarget, "zcode-cua-bridge.mjs")],
-  };
-  const zcodeVisibleEntry = {
-    command: nodeBin,
-    args: [join(bridgesTarget, "zcode-cua-visible-bridge.mjs")],
   };
 
   // 2. Install skills & merge MCP config per client
   for (const t of targets) {
     if (!opts.dryRun) {
       mkdirSync(t.skillsDir, { recursive: true });
-      for (const skillName of ["computer-use-orchestrator", "zcode-computer-use"]) {
+      for (const skillName of SKILL_NAMES) {
         const destSkill = join(t.skillsDir, skillName);
         const existingSkillMd = join(destSkill, "SKILL.md");
         const templateDir = join(rootDir, "skills", skillName);
@@ -392,7 +320,7 @@ function main() {
           join(destSkill, KIT_OWNERSHIP_MARKER),
           JSON.stringify(
             {
-              installed_by: "macos-computer-use-kit",
+              installed_by: "zov-computer-use",
               skill: skillName,
               installed_at: new Date().toISOString(),
             },
@@ -402,32 +330,16 @@ function main() {
           "utf-8"
         );
       }
-      const probeScript = join(t.skillsDir, "zcode-computer-use", "scripts", "rpc_probe.py");
+      const probeScript = join(t.skillsDir, "zov-computer-use", "scripts", "rpc_probe.py");
       if (existsSync(probeScript)) chmodSync(probeScript, 0o755);
     }
-    console.log(`[2/3] Installed skills (computer-use-orchestrator, zcode-computer-use) -> ${t.skillsDir}`);
+    console.log(`[2/3] Installed skills (computer-use-orchestrator, zov-computer-use) -> ${t.skillsDir}`);
 
     const cfg = loadJsonSafe(t.mcpConfigPath, opts.dryRun);
     if (!cfg.mcpServers || typeof cfg.mcpServers !== "object" || Array.isArray(cfg.mcpServers)) {
       cfg.mcpServers = {};
     }
-
-    if (effectiveMode === "open") {
-      cfg.mcpServers["zcode-cua"] = openServerEntry;
-      if (
-        cfg.mcpServers["zcode-cua-visible"] &&
-        JSON.stringify(cfg.mcpServers["zcode-cua-visible"]).includes("zcode-cua-visible-bridge")
-      ) {
-        delete cfg.mcpServers["zcode-cua-visible"];
-      }
-    } else if (effectiveMode === "zcode") {
-      cfg.mcpServers["zcode-cua"] = zcodeBridgeEntry;
-      cfg.mcpServers["zcode-cua-visible"] = zcodeVisibleEntry;
-    } else {
-      cfg.mcpServers["zcode-cua"] = zcodeBridgeEntry;
-      cfg.mcpServers["zcode-cua-visible"] = zcodeVisibleEntry;
-      cfg.mcpServers["cua-open"] = openServerEntry;
-    }
+    cfg.mcpServers["zov-cua"] = serverEntry;
 
     if (!opts.dryRun) {
       const bak = backupIfExists(t.mcpConfigPath, opts.dryRun);
@@ -440,14 +352,14 @@ function main() {
   // 3. Run read-only MCP handshake, helper binary smoke check & subagent guard probe
   if (!opts.dryRun && !opts.skipProbe) {
     const primaryTarget = targets[0];
-    let probePy = join(primaryTarget.skillsDir, "zcode-computer-use", "scripts", "rpc_probe.py");
+    let probePy = join(primaryTarget.skillsDir, "zov-computer-use", "scripts", "rpc_probe.py");
     if (!existsSync(probePy)) {
-      probePy = join(rootDir, "skills", "zcode-computer-use", "scripts", "rpc_probe.py");
+      probePy = join(rootDir, "skills", "zov-computer-use", "scripts", "rpc_probe.py");
     }
     console.log("[3/3] Verifying MCP stdio handshake, native helper readiness & subagent safety guard...");
     execFileSync(
       "python3",
-      [probePy, "--config", primaryTarget.mcpConfigPath, "--server", "zcode-cua", "--guard"],
+      [probePy, "--config", primaryTarget.mcpConfigPath, "--server", "zov-cua", "--guard"],
       {
         env: { ...process.env, HOME: opts.home },
         stdio: "inherit",
@@ -457,7 +369,7 @@ function main() {
     console.log("[3/3] Probe skipped (--dry-run or --skip-probe).");
   }
 
-  console.log("\n[SUCCESS] macOS Computer Use Kit is ready.");
+  console.log("\n[SUCCESS] Zov Computer Use is ready.");
   console.log("Next step on macOS: Ensure your terminal / agent app has Accessibility permission enabled in:");
   console.log("  System Settings -> Privacy & Security -> Accessibility");
 }

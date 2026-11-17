@@ -1,5 +1,5 @@
 /**
- * Core domain types for ZCode-compatible Computer Use runtime.
+ * Core domain types for Zov Computer Use runtime.
  */
 
 export interface Rectangle {

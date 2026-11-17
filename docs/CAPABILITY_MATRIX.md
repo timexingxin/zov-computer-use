@@ -1,8 +1,8 @@
 # Platform Capability & Tool Support Matrix
-> **Version**: `0.2.1`  
+> **Version**: `1.0.0`  
 > **Policy**: **Truthfulness > Tool Count**. No fake success or unexecuted stubs.
 
-This matrix documents the actual runtime support level for all **47 MCP tools** (39 primary tools + 8 aliases) exposed by `@zcode-community/mcp-server`.
+This matrix documents the actual runtime support level for all **47 MCP tools** (39 primary tools + 8 aliases) exposed by `@zov/mcp-server` (`zov-cua`).
 
 ## Support Levels
 - **VERIFIED (OS)**: Behavior asserted on macOS by an automated test that exercises the real OS helper or GUI (`rpc_probe.py`, `cli-doctor.test.mjs`, Swift CLI golden tests in `audit-regression.test.mjs`, or opt-in `gui-e2e-textedit.test.mjs`).

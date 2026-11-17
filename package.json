@@ -1,8 +1,8 @@
 {
-  "name": "macos-computer-use-kit",
-  "version": "0.2.1",
+  "name": "zov-computer-use",
+  "version": "1.0.0",
   "private": true,
-  "description": "Turnkey macOS Computer Use Skills + Open-Source Accessibility MCP Server + Optional ZCode Native Bridge for AI Agents.",
+  "description": "Zov Computer Use: Turnkey macOS Native Accessibility & CoreGraphics MCP Server + Agent Skills (Zero Focus Steal).",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -18,7 +18,7 @@
     "cua": "node packages/cli/bin/cua.mjs",
     "doctor": "node packages/cli/bin/cua.mjs doctor",
     "install-kit": "node scripts/install.mjs",
-    "probe": "python3 skills/zcode-computer-use/scripts/rpc_probe.py --guard"
+    "probe": "python3 skills/zov-computer-use/scripts/rpc_probe.py --guard"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { MCPServer, createPlatformAdapter } from "@zcode-community/mcp-server";
+import { MCPServer, createPlatformAdapter } from "@zov/mcp-server";
 import { runDoctor } from "./doctor.js";
 
 function getCliVersion(): string {
@@ -32,7 +32,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       }
 
       console.log("\n=======================================================");
-      console.log(" ZCode Computer Use (CUA) Diagnostic Doctor Report");
+      console.log(" Zov Computer Use (CUA) Diagnostic Doctor Report");
       console.log("=======================================================\n");
 
       console.log(`[${report.checks.runtime.valid ? "PASS" : "FAIL"}] Node.js Runtime: v${report.checks.runtime.node_version} (>= 20 required)`);
@@ -44,7 +44,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       console.log(`[${report.checks.environment.window_server ? "PASS" : "WARN"}] WindowServer: ${report.checks.environment.window_server ? "Running" : "Not detected"}`);
       console.log(`[${report.checks.environment.coregraphics_ready ? "PASS" : "WARN"}] CoreGraphics Display: ${report.checks.environment.coregraphics_ready ? "Ready" : "Unavailable"}`);
       console.log(`[${report.checks.environment.textedit_available ? "PASS" : "INFO"}] TextEdit Availability: ${report.checks.environment.textedit_available ? "Available (Ready for GUI E2E)" : "Not Found"}`);
-      console.log(`[${report.checks.zcode_integration.installed ? "PASS" : "INFO"}] ZCode Integration: ${report.checks.zcode_integration.installed ? `Detected (${report.checks.zcode_integration.app_path})` : "Standalone Mode (ZCode app not detected)"}`);
       console.log(`[${report.checks.mcp.available ? "PASS" : "FAIL"}] MCP Tool Registry: ${report.checks.mcp.tools_count} standard tools loaded\n`);
 
       console.log(`Core Engine Status: ${report.core_ready ? "PASS (Ready for Agent automation)" : "FAIL"}`);
@@ -95,7 +94,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     case "version":
     case "-v":
     case "--version": {
-      console.log(`zcode-desktop-control v${getCliVersion()}`);
+      console.log(`zov-computer-use v${getCliVersion()}`);
       break;
     }
 
@@ -104,8 +103,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     case "--help":
     default: {
       console.log(`
-ZCode Desktop Control CLI (cua) v${getCliVersion()}
-Independent, local-first Computer Use runtime and MCP bridge for AI agents.
+Zov Computer Use CLI (cua) v${getCliVersion()}
+Native macOS Accessibility & CoreGraphics Computer Use runtime for AI agents.
 
 Usage:
   cua doctor [--json] [--require-real-gui] Run environment, permissions, and tool diagnostics

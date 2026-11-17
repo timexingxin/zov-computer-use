@@ -1,4 +1,4 @@
-macOS Computer Use Kit
+Zov Computer Use
 Copyright 2026 timexingxin
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -8,8 +8,8 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 
 Third-Party & Trademark Disclaimer:
-This project is an independent open-source initiative and is not affiliated with,
-sponsored by, or endorsed by ZCode, Z.ai, Google, Anthropic, or Anysphere.
-Optional interoperability bridges connect to separately installed local software
-via standard operating system IPC and Model Context Protocol (MCP) interfaces;
-no proprietary binaries are bundled or redistributed in this repository.
+Zov Computer Use is an independent open-source project and is not affiliated with,
+sponsored by, or endorsed by Apple, Google, Anthropic, or Anysphere.
+All system integration uses public operating system Accessibility, CoreGraphics,
+and Model Context Protocol (MCP) interfaces; no proprietary binaries are bundled
+or redistributed in this repository.

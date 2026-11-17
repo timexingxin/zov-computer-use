@@ -11,7 +11,7 @@ import {
   type TypeOptions,
   type WindowInfo,
   UnsupportedPlatformError,
-} from "@zcode-community/core";
+} from "@zov/core";
 
 /**
  * Windows Platform Adapter.

@@ -1,6 +1,6 @@
 # Demo Recording Script (30–60s)
 
-A step-by-step walkthrough to record a high-impact, professional demonstration of `macos-computer-use-kit` operating safely without stealing user focus.
+A step-by-step walkthrough to record a concise demonstration of **Zov Computer Use** (`zov-computer-use`) operating safely without stealing user focus.
 
 ---
 
@@ -14,7 +14,7 @@ Risk Level: **Zero** (no personal data, credentials, or network exposure).
 ## Timeline & Narration Script
 
 ### [0:00 - 0:10] Preflight & Doctor Verification
-1. Open Terminal in the `macos-computer-use-kit` workspace.
+1. Open Terminal in the `zov-computer-use` workspace.
 2. Run:
    ```bash
    npm run doctor
@@ -22,25 +22,22 @@ Risk Level: **Zero** (no personal data, credentials, or network exposure).
 3. Highlight the green `[PASS]` marks verifying Node.js, Native AX Helper, macOS Accessibility, and 47 MCP tools registered.
 
 ### [0:10 - 0:25] App Discovery & Semantic Observation
-1. Launch Calculator in background:
-   ```bash
-   open -a Calculator
-   ```
-2. Query active state via CLI or MCP inspector:
+1. Launch Calculator in background (`activate=false` via MCP or `open -g -a Calculator`).
+2. Query running apps via CLI or MCP inspector:
    ```bash
    node packages/cli/bin/cua.mjs list-apps
    ```
-3. Show that `Calculator` is detected with PID and window coordinates.
+3. Show that `Calculator` is detected with PID and window coordinates while your active window keeps focus.
 
 ### [0:25 - 0:45] Semantic Element Interaction
 1. Demonstrate semantic click on Calculator buttons:
    - Click "7" button semantically via Accessibility (no cursor movement).
    - Click "+" button.
    - Click "5" button.
-   - Click "=" button.
+   - Click "=" button with `return_state="compact"`.
 2. Observe result: Display updates to `12`.
 3. Highlight that the user's physical mouse remained still and user was free to type in another window.
 
 ### [0:45 - 0:60] Clean Exit & Kill Switch
 1. Call `stop_computer_control` or close Calculator.
-2. End on project GitHub link: `https://github.com/timexingxin/macos-computer-use-kit`.
+2. End on project GitHub link: `https://github.com/timexingxin/zov-computer-use`.

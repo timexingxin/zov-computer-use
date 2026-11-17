@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Repository hygiene, privacy, and secret/path leak gate.
- * Ensures zero personal filesystem paths, zero tokens, and valid skill frontmatter.
+ * Repository hygiene, privacy, brand purity, and secret/path leak gate.
+ * Ensures zero personal filesystem paths, zero legacy brand references, zero tokens, and valid skill frontmatter.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -10,13 +10,15 @@ import { fileURLToPath } from "node:url";
 const rootDir = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "__pycache__"]);
 
-// Build dynamically so this file itself does not contain literal personal strings
+// Build dynamically so this file itself does not contain literal forbidden strings
 const FORBIDDEN_PATTERNS = [
   new RegExp("/Users/" + "timexingxin", "i"),
   /gho_[A-Za-z0-9_]{20,}/,
   /ghp_[A-Za-z0-9_]{20,}/,
   /sk-[A-Za-z0-9_-]{20,}/,
   new RegExp("current_" + "chrome_"),
+  new RegExp("z" + "code", "i"),
+  new RegExp("macos-computer-use-" + "kit", "i"),
 ];
 
 function walk(dir, out = []) {
@@ -47,7 +49,7 @@ for (const file of walk(rootDir)) {
 
 for (const skillRel of [
   "skills/computer-use-orchestrator/SKILL.md",
-  "skills/zcode-computer-use/SKILL.md",
+  "skills/zov-computer-use/SKILL.md",
 ]) {
   const text = readFileSync(join(rootDir, skillRel), "utf-8");
   if (!text.startsWith("---\nname:")) {
@@ -61,4 +63,4 @@ if (violations > 0) {
   process.exit(1);
 }
 
-console.log("[lint] All privacy, secret, and skill frontmatter checks passed.");
+console.log("[lint] All privacy, brand, secret, and skill frontmatter checks passed.");

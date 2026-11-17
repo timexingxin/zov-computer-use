@@ -22,7 +22,7 @@ This project follows [Semantic Versioning (SemVer)](https://semver.org/).
    ```
 4. **Tag & Publish**:
    ```bash
-   git tag v0.2.1
+   git tag v1.0.0
    git push origin main --tags
    ```
 5. **GitHub Release**:

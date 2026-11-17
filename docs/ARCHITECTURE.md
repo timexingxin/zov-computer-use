@@ -1,6 +1,6 @@
-# System Architecture: macos-computer-use-kit
+# System Architecture: Zov Computer Use (`zov-computer-use`)
 
-`macos-computer-use-kit` is a modular, local-first Computer Use runtime engineered for AI agents, featuring first-class Model Context Protocol (MCP) stdio execution and turnkey skill installation.
+`zov-computer-use` is a modular, local-first Computer Use runtime engineered for AI agents, featuring first-class Model Context Protocol (MCP) stdio execution and turnkey skill installation.
 
 ---
 

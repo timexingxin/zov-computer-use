@@ -31,7 +31,7 @@ import {
   WindowNotFoundError,
   assignHandlesToTree,
   resolveElementWithAmbiguity,
-} from "@zcode-community/core";
+} from "@zov/core";
 
 const execFile = promisify(execFileCallback);
 const MAX_RETAINED_STATES = 64;
@@ -447,7 +447,7 @@ export class MacOSAdapter implements PlatformAdapter {
       throw new InvalidArgumentError("Specify either window_id or display_id for screenshot, not both");
     }
 
-    const tempFile = join(tmpdir(), `zcode-cap-${randomUUID().slice(0, 8)}.png`);
+    const tempFile = join(tmpdir(), `zov-cap-${randomUUID().slice(0, 8)}.png`);
     const args = ["-x", "-t", "png"];
 
     if (options.window_id !== undefined) {
@@ -1183,7 +1183,7 @@ export class MacOSAdapter implements PlatformAdapter {
   }
 
   async requestAccess(_types?: ("accessibility" | "screen_recording")[]): Promise<PermissionReport> {
-    // Strictly read-only per zcode-computer-use contract: never pop System Settings windows
+    // Strictly read-only per zov-computer-use contract: never pop System Settings windows
     return this.checkPermissions();
   }
 }

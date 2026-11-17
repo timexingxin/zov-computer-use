@@ -1,6 +1,6 @@
 # Computer Use MCP Tools Reference
 
-`@zcode-community/mcp-server` exposes **47 standardized tools** (39 primary tools + 8 backward-compatible aliases) through the Model Context Protocol (MCP), with runtime schema validation enforced on `required` fields, enums, finite coordinates, and integer bounds.
+`@zov/mcp-server` (`zov-cua`) exposes **47 standardized tools** (39 primary tools + 8 backward-compatible aliases) through the Model Context Protocol (MCP), with runtime schema validation enforced on `required` fields, enums, finite coordinates, and integer bounds.
 
 ---
 

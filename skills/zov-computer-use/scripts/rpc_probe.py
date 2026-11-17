@@ -173,7 +173,7 @@ class Client:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "macos-cua-kit-readonly-probe", "version": "1.0.0"},
+                "clientInfo": {"name": "zov-cua-readonly-probe", "version": "1.0.0"},
             },
         )
         await self.notify("notifications/initialized")
@@ -269,7 +269,7 @@ async def probe(options):
                 {
                     "name": "request_access",
                     "arguments": {},
-                    "_meta": {"com.zcode/request-context": {"runtime_scope": "subagent"}},
+                    "_meta": {"com.zov/request-context": {"runtime_scope": "subagent"}},
                 },
             )
             receipt["guard_result"] = result
@@ -314,7 +314,7 @@ async def probe(options):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help="Path to MCP JSON configuration file")
-    parser.add_argument("--server", default="zcode-cua", help="MCP server key to probe (default: zcode-cua)")
+    parser.add_argument("--server", default="zov-cua", help="MCP server key to probe (default: zov-cua)")
     parser.add_argument("--guard", action="store_true", help="Verify subagent metadata refusal without GUI writes")
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--output", help="Optional path to write JSON receipt")

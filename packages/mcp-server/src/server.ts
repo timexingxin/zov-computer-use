@@ -12,10 +12,10 @@ import {
   getPlatformCapabilities,
   redactElementSecrets,
   reduceToCompactState,
-} from "@zcode-community/core";
-import { MacOSAdapter } from "@zcode-community/platform-macos";
-import { WindowsAdapter } from "@zcode-community/platform-windows";
-import { LinuxAdapter } from "@zcode-community/platform-linux";
+} from "@zov/core";
+import { MacOSAdapter } from "@zov/platform-macos";
+import { WindowsAdapter } from "@zov/platform-windows";
+import { LinuxAdapter } from "@zov/platform-linux";
 import { TOOLS_MANIFEST, type ToolDefinition } from "./tools-manifest.js";
 
 const MAX_RETAINED_STATES = 64;
@@ -46,7 +46,7 @@ function readServerVersion(): string {
       return parsed.version.trim();
     }
   } catch {}
-  return "0.2.0";
+  return "1.0.0";
 }
 
 const SERVER_VERSION = readServerVersion();
@@ -348,7 +348,7 @@ export class MCPServer {
     structuredContent?: Record<string, any>;
     isError?: boolean;
   }> {
-    if (meta?.["com.zcode/request-context"]?.runtime_scope === "subagent") {
+    if (meta?.["com.zov/request-context"]?.runtime_scope === "subagent") {
       return {
         isError: true,
         structuredContent: { code: "SUBAGENT_COMPUTER_USE_UNAVAILABLE" },
@@ -785,7 +785,7 @@ export class MCPServer {
                   tools: { listChanged: false },
                 },
                 serverInfo: {
-                  name: "macos-computer-use-kit",
+                  name: "zov-computer-use",
                   version: SERVER_VERSION,
                 },
               },

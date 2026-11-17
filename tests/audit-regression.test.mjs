@@ -417,12 +417,12 @@ test("R9 + B11 + B15: Doctor fails core_ready when native_ax_helper binary is mi
 });
 
 test("R10 + B10: Installer aborts on malformed JSON before touching skills, backs up full skill directories, and honors .kit-owned.json on uninstall", () => {
-  const fakeHome = mkdtempSync(join(tmpdir(), "macos-cua-r10-"));
+  const fakeHome = mkdtempSync(join(tmpdir(), "zov-cua-r10-"));
   try {
     const agyDir = join(fakeHome, ".gemini", "config");
-    const userSkillDir = join(agyDir, "skills", "zcode-computer-use");
+    const userSkillDir = join(agyDir, "skills", "zov-computer-use");
     mkdirSync(join(userSkillDir, "scripts"), { recursive: true });
-    writeFileSync(join(userSkillDir, "SKILL.md"), "---\nname: zcode-computer-use\n---\nUSER_AUTHORED", "utf-8");
+    writeFileSync(join(userSkillDir, "SKILL.md"), "---\nname: zov-computer-use\n---\nUSER_AUTHORED", "utf-8");
     writeFileSync(join(userSkillDir, "scripts", "my-custom-helper.sh"), "#!/bin/sh\necho custom\n", "utf-8");
     const mcpCfgPath = join(agyDir, "mcp_config.json");
     writeFileSync(mcpCfgPath, "{ invalid json trailing comma, }", "utf-8");
@@ -431,11 +431,11 @@ test("R10 + B10: Installer aborts on malformed JSON before touching skills, back
     assert.throws(() => {
       execFileSync(
         process.execPath,
-        [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--mode", "open", "--skip-probe"],
+        [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--skip-probe"],
         { cwd: repoRoot, stdio: "pipe" }
       );
     });
-    assert.equal(readFileSync(join(userSkillDir, "SKILL.md"), "utf-8"), "---\nname: zcode-computer-use\n---\nUSER_AUTHORED");
+    assert.equal(readFileSync(join(userSkillDir, "SKILL.md"), "utf-8"), "---\nname: zov-computer-use\n---\nUSER_AUTHORED");
 
     // 2. Uninstall must NOT delete a skill directory that lacks .kit-owned.json
     writeFileSync(mcpCfgPath, "{}", "utf-8");
@@ -449,11 +449,11 @@ test("R10 + B10: Installer aborts on malformed JSON before touching skills, back
     // 3. Install over pre-existing user skill directory backs up the ENTIRE directory (preserving my-custom-helper.sh)
     execFileSync(
       process.execPath,
-      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--mode", "open", "--skip-probe"],
+      [join(repoRoot, "scripts", "install.mjs"), "--home", fakeHome, "--client", "antigravity", "--skip-probe"],
       { cwd: repoRoot, stdio: "pipe" }
     );
     const skillSiblings = readdirSync(join(agyDir, "skills"));
-    const bakDirName = skillSiblings.find((n) => n.startsWith("zcode-computer-use.bak-"));
+    const bakDirName = skillSiblings.find((n) => n.startsWith("zov-computer-use.bak-"));
     assert.ok(bakDirName, "Full directory backup must be created before replacing user skill dir");
     assert.equal(existsSync(join(agyDir, "skills", bakDirName, "scripts", "my-custom-helper.sh")), true);
     assert.equal(existsSync(join(userSkillDir, ".kit-owned.json")), true);
