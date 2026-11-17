@@ -692,7 +692,7 @@ namespace Zov.WindowsHelper
 
         private static int ParsePositiveInt(string raw, string name)
         {
-            int val;
+            int val = 0;
             if (string.IsNullOrEmpty(raw) || !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out val) || val <= 0)
             {
                 JsonOut.Fail(name + " must be a positive integer", "invalid_argument");
@@ -702,7 +702,7 @@ namespace Zov.WindowsHelper
 
         private static long ParsePositiveLong(string raw, string name)
         {
-            long val;
+            long val = 0;
             if (string.IsNullOrEmpty(raw) || !long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out val) || val <= 0)
             {
                 JsonOut.Fail(name + " must be a positive integer", "invalid_argument");
@@ -712,7 +712,7 @@ namespace Zov.WindowsHelper
 
         private static double ParseCoord(string raw, string name)
         {
-            double val;
+            double val = 0.0;
             if (string.IsNullOrEmpty(raw) || !double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out val) || double.IsNaN(val) || double.IsInfinity(val) || Math.Abs(val) > 100000.0)
             {
                 JsonOut.Fail("Invalid or out-of-bounds coordinate for " + name, "invalid_argument");
@@ -1713,13 +1713,13 @@ namespace Zov.WindowsHelper
                     {
                         JsonOut.Fail("Windows UIPI blocked action on elevated control", "permission_denied");
                     }
-                    catch (InvalidOperationException ex)
-                    {
-                        JsonOut.Fail("UIA pattern rejected operation: " + ex.Message, "action_unavailable");
-                    }
                     catch (ElementNotEnabledException)
                     {
                         JsonOut.Fail("Target element is disabled", "action_unavailable");
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        JsonOut.Fail("UIA pattern rejected operation: " + ex.Message, "action_unavailable");
                     }
 
                     Console.Out.WriteLine("{\"ok\":true}");

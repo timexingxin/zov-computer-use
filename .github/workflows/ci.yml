@@ -28,10 +28,11 @@ jobs:
       - name: Lint & privacy check
         run: npm run lint
 
-      - name: Build & typecheck runtime
-        run: |
-          npm run build
-          npm run typecheck
+      - name: Build runtime & native helpers
+        run: npm run build
+
+      - name: Typecheck workspace
+        run: npm run typecheck
 
       - name: Run CLI Doctor diagnostics
         run: npm run doctor
